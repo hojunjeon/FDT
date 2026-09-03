@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -14,14 +15,38 @@ DEFAULT_MODEL = "qwen2.5:7b-instruct-q4_K_M"
 
 
 class OllamaClient:
-    def __init__(self, url: str = DEFAULT_URL, model: str = DEFAULT_MODEL, timeout: float = 120.0):
-        self.url, self.model, self.timeout = url, model, timeout
+    def __init__(self, url: str | None = None, model: str | None = None, timeout: float = 120.0):
+        self.url = (url or os.getenv("FDT_OLLAMA_URL", DEFAULT_URL)).rstrip("/")
+        self.model = model or os.getenv("FDT_LLM_MODEL", DEFAULT_MODEL)
+        self.timeout = timeout
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
              temperature: float = 0.0, json_mode: bool = False) -> dict[str, Any]:
         """POST /api/chat (stream=false). 응답 message 를 그대로 반환. §8.1"""
-        raise NotImplementedError
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": temperature, "num_ctx": 8192},
+        }
+        if tools:
+            payload["tools"] = tools
+        if json_mode:
+            payload["format"] = "json"
+        response = httpx.post(f"{self.url}/api/chat", json=payload, timeout=self.timeout)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("message", data)
 
     def available(self) -> bool:
         """서버 응답 + 모델 존재 확인."""
-        raise NotImplementedError
+        try:
+            response = httpx.get(f"{self.url}/api/tags", timeout=self.timeout)
+            response.raise_for_status()
+            models = response.json().get("models", [])
+            return any(
+                isinstance(item, dict) and item.get("name") == self.model
+                for item in models
+            )
+        except (httpx.HTTPError, ValueError, TypeError):
+            return False
