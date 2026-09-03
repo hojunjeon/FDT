@@ -430,7 +430,7 @@ level = SAFE (≥ 70) / WARNING (≥ 40) / DANGER
 ### 8.1 로컬 LLM
 
 - 런타임: Ollama (설치됨, v0.32). 기본 모델 `qwen2.5:7b-instruct-q4_K_M` (4.7GB, `tools` capability 확인됨). 근거: VRAM 8GB(RTX 4070 Laptop) 에서 7B Q4 + 컨텍스트 8k 가 안전하게 올라가고, 한국어와 tool calling 이 동급 중 안정적. 대체 후보 `qwen3:8b`(더 나은 한국어, thinking 으로 지연 증가) 는 §14 에 실험 항목으로.
-- 호출: `POST {url}/api/chat`, `stream=false`. 툴 선택 단계 `temperature=0`, 코칭 단계 `temperature=0.7`, `num_ctx=8192`. 폴백 분류기·파라미터 추출은 `format="json"`.
+- 호출: `POST {url}/api/chat`, `stream=false`. 툴 선택·코칭 단계 모두 `temperature=0`으로 고정해 숫자 충실도 1차 통과를 재현하고, `num_ctx=8192`를 사용한다. 폴백 분류기·파라미터 추출은 `format="json"`.
 - 환경변수 `FDT_OLLAMA_URL`, `FDT_LLM_MODEL`. 서버 미가동 시 `available()==False` → 에이전트는 **툴 라우팅을 규칙 기반 키워드 매칭으로 대체**하고 코칭은 템플릿 폴백. 즉 LLM 없이도 전체 파이프라인이 동작해야 한다 (테스트는 LLM 없이 돈다).
 
 ### 8.2 툴 정의 (FDT-INP-02)
