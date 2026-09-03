@@ -38,6 +38,11 @@ KeyFin은 "소비 내역을 분석해 카테고리별 예산을 안내하고, �
 - 담당 파일(설계서 §13)만 수정한다. 테스트가 깨진 상태로 push 하지 않는다.
 - 실행: `.venv/Scripts/python -m pytest -q`, `PYTHONIOENCODING=utf-8 .venv/Scripts/python -m fdt.cli ...`
 
+## 작업 기록 규칙
+
+- 파일 변경 작업이 끝나면 [`$devlog`](C:\Users\SSAFY\.codex\skills\devlog\SKILL.md)를 사용해 `docs/devlog/yymmdd.md`에 근거 기반 작업 기록을 추가한다.
+- 읽기 전용 질문·설명·상태 확인은 기록하지 않으며, 실제 변경·검증·커밋만 기록한다. 미검증 결과는 `UNVERIFIED`로 표시한다.
+
 ## Git 규칙
 
 - **원격**: `https://github.com/hojunjeon/FDT.git`, 브랜치는 `main` 하나만 사용한다.
