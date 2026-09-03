@@ -1,0 +1,14 @@
+<svg width="240" height="240" viewBox="0 0 240 240" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FDT 고양이 코치">
+  <defs><linearGradient id="bg" x1="20" y1="20" x2="220" y2="220" gradientUnits="userSpaceOnUse"><stop stop-color="#FFF4D7"/><stop offset="1" stop-color="#DFF3E6"/></linearGradient></defs>
+  <circle cx="120" cy="120" r="98" fill="url(#bg)"/>
+  <path d="M58 94 52 48l42 31M182 94l6-46-42 31" fill="#E8A66F" stroke="#5B392D" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M58 113c0-38 27-62 62-62s62 24 62 62c0 37-28 58-62 58s-62-21-62-58Z" fill="#E8A66F" stroke="#5B392D" stroke-width="6"/>
+  <path d="M82 100c8-8 18-8 25 0M133 100c7-8 17-8 25 0" stroke="#5B392D" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="92" cy="111" r="7" fill="#293831"/><circle cx="148" cy="111" r="7" fill="#293831"/>
+  <path d="M111 130c5-4 13-4 18 0-2 8-5 11-9 11s-7-3-9-11Z" fill="#B76162"/>
+  <path d="M120 141c-1 11-13 14-21 7M120 141c1 11 13 14 21 7" stroke="#5B392D" stroke-width="5" stroke-linecap="round"/>
+  <path d="M87 134 48 128M87 145l-36 9M153 134l39-6M153 145l36 9" stroke="#5B392D" stroke-width="4" stroke-linecap="round"/>
+  <path d="M59 193c6-28 28-42 61-42s55 14 61 42" fill="#23614F" stroke="#17473D" stroke-width="6"/>
+  <path d="M106 157c5 11 9 15 14 15s9-4 14-15" stroke="#F7E8D0" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="120" cy="178" r="6" fill="#F6B852"/>
+</svg>

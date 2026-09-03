@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="FDT 개인 금융 디지털 트윈 로컬 대시보드">
+  <link rel="icon" href="/static/cat-agent.svg" type="image/svg+xml">
+  <title>FDT · 금융 디지털 트윈</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">F</span><div><h1>Finance Digital Twin</h1><p>읽기 전용 분석 · 시뮬레이션 · 코칭</p></div></div>
+      <div id="runtime" class="runtime" aria-live="polite"><span></span>엔진 확인 중</div>
+    </header>
+
+    <main class="workspace">
+      <aside class="panel chooser-panel">
+        <div class="panel-title"><span class="step">01</span><div><h2>사용자 선택</h2><p>금융 데이터와 말투를 따로 고릅니다</p></div></div>
+        <section>
+          <h3>금융 사용자 프로필</h3>
+          <div id="profileList" class="choice-list" aria-live="polite"></div>
+        </section>
+        <section class="coach-choice">
+          <h3>코치 페르소나</h3>
+          <div id="coachList" class="coach-list"></div>
+        </section>
+        <label class="date-field" for="asOf">기준일 <input id="asOf" type="date"></label>
+        <p class="scope-note">DEMO 시드만 사용합니다. 실제 이체·결제는 실행하지 않습니다.</p>
+      </aside>
+
+      <section class="center-column">
+        <div class="agent-card">
+          <div class="agent-copy"><span class="eyebrow">FDT COACH</span><h2 id="agentTitle">프로필을 선택하세요</h2><p id="agentHint">엔진 결과를 바탕으로 금융 상태를 설명합니다.</p></div>
+          <div class="cat" aria-hidden="true"><img src="/static/cat-agent.svg" alt=""></div>
+          <div class="session-buttons"><button id="startButton" class="primary" disabled>대화 시작</button><button id="endButton" class="secondary" disabled>대화 종료</button></div>
+        </div>
+        <div class="chat-card">
+          <div id="chatLog" class="chat-log" aria-live="polite"><div class="empty">왼쪽에서 금융 사용자와 코치 페르소나를 선택하세요.</div></div>
+          <div id="quickPrompts" class="quick-prompts">
+            <button data-prompt="오늘 안심하고 쓸 수 있는 돈이 얼마야?">오늘 한도</button>
+            <button data-prompt="앞으로 잔액을 예측해줘">잔액 예측</button>
+            <button data-prompt="카드 결제 부족 위험이 있어?">결제 위험</button>
+            <button data-prompt="이번 달 소비 알림을 보여줘">소비 알림</button>
+          </div>
+          <form id="chatForm" class="composer"><textarea id="messageInput" maxlength="1000" rows="1" placeholder="대화를 시작한 뒤 메시지를 입력하세요" disabled></textarea><button id="sendButton" class="send" type="submit" disabled>전송</button></form>
+        </div>
+      </section>
+
+      <aside class="panel state-panel">
+        <div class="panel-title"><span class="step">02</span><div><h2>금융 상태</h2><p>서버가 계산한 결과를 표시합니다</p></div></div>
+        <div id="stateSummary" class="state-summary empty-state">프로필을 선택하세요.</div>
+        <div class="status-card"><div class="status-heading"><span>방 상태</span><strong id="roomStatus">-</strong></div><p id="roomDetail">날씨 · 표정 · 행동</p></div>
+        <div class="status-card"><div class="status-heading"><span>결제 부족 위험</span><strong id="riskStatus">-</strong></div><p id="riskDetail">위험 점수와 확률은 FDT 엔진이 계산합니다.</p></div>
+        <div class="envelope-card"><div class="status-heading"><span>7개 예산 봉투</span><small id="cycleDate">-</small></div><div id="envelopeList" class="envelope-list"></div></div>
+      </aside>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
