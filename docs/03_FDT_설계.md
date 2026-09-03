@@ -9,13 +9,14 @@
 
 ## 0. 한 페이지 요약
 
-KeyFin 의 **개인 금융 디지털 트윈(PFDT)** 코어와, 그 위에서 동작하는 **읽기 전용 분석·코칭 에이전트**를 만든다.
+KeyFin 의 **개인 금융 디지털 트윈(PFDT)** 코어와, 그 위에서 동작하는 **읽기 전용 분석·코칭 에이전트**, 이를 조작·확인하는 **로컬 대시보드**를 만든다.
 
 - 입력: SSAFY 금융망 API 응답 형식의 JSON (지금은 생성기가 만든 더미, 나중엔 LIVE).
 - 코어: 원장 → `State(t)` + `Behavior` → 단일 시뮬레이터(전이 함수) → 예측·리스크·목표 역산·진단.
 - 에이전트: 로컬 LLM(Ollama, qwen2.5 7B)이 **툴 선택과 문장 생성만** 담당. 숫자는 100% 코어가 낸다.
+- 대시보드: `KeyFin_Local_Agent` 의 3열 UI 흐름을 참고한 정적 HTML/CSS/JS + 얇은 FastAPI 어댑터. 사용자 프로필과 코치 페르소나는 별도 선택한다.
 - 검증: 홀드아웃 백테스트, 리스크 캘리브레이션, 코칭 숫자 충실도 자동 검사, 툴 라우팅 평가.
-- 범위 밖: 실제 이체·결제 실행, 방·고양이 UI 렌더링, 회원·알림 인프라.
+- 범위 밖: 실제 이체·결제 실행, 운영 배포·회원·알림 인프라, 게임 수준의 방·고양이 렌더링.
 
 ---
 
@@ -36,13 +37,16 @@ KeyFin 의 **개인 금융 디지털 트윈(PFDT)** 코어와, 그 위에서 동
 | FDT-ANL-03 | 가속도·우려 결제 | 알림 목록 (결정론 규칙) |
 | FDT-INT-01 | 페르소나 코칭 | 3종 말투 문장 + 숫자 충실도 검사 |
 | FDT-INT-02 | 방 상태 매핑 | 날씨/표정/행동 파라미터 JSON |
+| FDT-WEB-01 | 로컬 HTTP 연동 | 프로필 조회·세션·채팅을 제공하는 FastAPI 어댑터 |
+| FDT-UI-01 | 로컬 대시보드 | 상태·봉투·예측·What-if·목표·위험·코칭 시각화 |
 | FR-BGT-01 | 예산 제안 | 이력 기반 결정론 제안 (승인·조정 UI 는 범위 밖) |
 | FR-USR-04 | 온보딩 시딩 | 프로필 생성기 (완료) |
 
 ### 1.2 비범위 (결정 사항)
 
 - **이체·결제 실행**(FR-PAY-03/04/06/08): 하지 않는다. FDT.md 원칙. 결제일별 부족액 JSON 은 산출하되 "이체 제안" 도 만들지 않는다.
-- **UI**: 방·캐릭터·차트 렌더링은 다른 저장소. 여기서는 렌더링에 필요한 JSON 까지만.
+- **운영 UI**: 로그인, 실제 사용자 금융 연동, 모바일 대응, 알림, 운영 배포는 범위 밖. v1.0 은 로컬 데모 대시보드만 제공한다.
+- **게임 UI**: 방·고양이 애니메이션과 코인 상점은 범위 밖. 대시보드는 `RoomProjection` 을 상태 카드와 정적 고양이 이미지로만 표현한다.
 - **회원/연동/알림 인프라**(USR, NTF), **코인 계산**(GAM-03/04): 범위 밖. INT-02 에서 `coin_eligible_today` 플래그만 낸다.
 - **KoELECTRA 파인튜닝**: 하지 않는다. 시딩 가맹점은 매핑 테이블이 100% 커버하고, 미등록 가맹점은 LLM 폴백으로 처리한다. P2 로 이연.
 - **RAG 정책 추천**(FDT-INT-03, FR-AI-05/06): 이번 버전 범위 밖. 툴 인터페이스만 예약(§8.2 `policy_tips`, 미구현 표시).
@@ -76,6 +80,7 @@ KeyFin 의 **개인 금융 디지털 트윈(PFDT)** 코어와, 그 위에서 동
 | 6 | 카드 취소 표현 | 금융망은 원 승인 레코드의 `cardStatus` 만 `취소`로 바뀜. 원장은 **승인(−)+취소(+) 두 건**으로 기록 | 이력 보존 + 순액 0 (구현 중 발견, 테스트로 고정) |
 | 7 | 미결제 청구서 재시도 | 잔액 부족 시 **다음 날부터 매일 16:00 재시도**로 가정. 금융망 실제 동작은 미확인 → §14 리스크 | 생성기와 시뮬레이터가 같은 가정을 써야 함 |
 | 8 | 미결 #7 질문 빈도 | 확신도 < 0.7 인 소비 건만 "미확정"으로 집계 | INT-02 코인 플래그, State.unconfirmed_count |
+| 9 | 기존 결정은 UI를 다른 저장소 범위로 둠 | **로컬 데모 대시보드와 HTTP 어댑터는 포함**. 운영 UI와 게임 UI는 계속 제외 | 사용자 결정 (2026-09-03), §9.2 |
 
 ---
 
@@ -108,6 +113,12 @@ flowchart LR
     F -->|실패| TB[템플릿 폴백]
   end
   R1 & R2 & R3 & GO & AN & PR --> EX
+  subgraph WEB[로컬 대시보드]
+    D[index.html + app.js<br/>상태·차트·채팅] --> W[web.py<br/>FastAPI 어댑터]
+  end
+  W -->|프로필 로드| I
+  W -->|사용자 발화| U
+  ST & R1 & R2 & R3 & GO & AN & PR -->|JSON| W
 ```
 
 **불변 원칙 (MUST)**
@@ -117,6 +128,8 @@ flowchart LR
 3. 원장(`LedgerTx` 목록)은 불변. What-if 는 `State` 복사본 위에서만 돈다.
 4. 모든 난수는 명시적 시드를 받는다. 같은 입력·같은 시드 → 같은 출력 (바이트 단위).
 5. 금액은 정수 원(`int`). 부동소수는 확률·비율·로그정규 파라미터에만.
+6. `fdt/web.py` 는 코어·에이전트의 공개 함수만 호출하는 어댑터다. 금융 숫자나 위험 판정을 다시 계산하지 않는다.
+7. 브라우저는 서버 JSON 을 표시만 한다. 금액 포맷과 진행 막대 비율 외의 도메인 판단을 JavaScript 에 두지 않는다.
 
 ---
 
@@ -131,21 +144,24 @@ fdt/
   data/generator.py          [완료] 프로필 → FinSnapshot + ground_truth
   ledger/classify.py         [완료] 라벨링 (폴백 분류기 Protocol 포함)
   ledger/ingest.py           [완료] 스냅샷 → 원장, 대사(reconcile), 저장/로드
-  twin/state.py              [stub] §7.1
-  twin/behavior.py           [stub] §7.2
-  twin/simulate.py           [stub] §7.3 §7.4
-  twin/goal.py               [stub] §7.5
-  twin/analytics.py          [stub] §7.6
-  twin/projection.py         [stub] §7.7
-  agent/llm.py               [stub] §8.1
-  agent/tools.py             [stub] §8.2
-  agent/coach.py             [stub] §8.3 §8.4 §8.5
-  agent/agent.py             [stub] §8.6
-  eval/backtest.py           [stub] §11.4
-  eval/calibration.py        [stub] §11.5
-  eval/faithfulness.py       [stub] §11.6 §11.7
-  cli.py                     [부분] gen 만 있음. §9 의 나머지 명령 추가
+  twin/state.py              [완료] §7.1
+  twin/behavior.py           [완료] §7.2
+  twin/simulate.py           [완료] §7.3 §7.4
+  twin/goal.py               [완료] §7.5
+  twin/analytics.py          [완료] §7.6
+  twin/projection.py         [완료] §7.7
+  agent/llm.py               [완료] §8.1
+  agent/tools.py             [완료] §8.2
+  agent/coach.py             [완료] §8.3 §8.4 §8.5
+  agent/agent.py             [완료] §8.6
+  web.py                     [완료] §9.2 HTTP·세션 어댑터
+  static/                    [완료] §9.2 로컬 대시보드 HTML/CSS/JS/SVG
+  eval/backtest.py           [완료] §11.4
+  eval/calibration.py        [완료] §11.5
+  eval/faithfulness.py       [완료] §11.6 §11.7
+  cli.py                     [완료] §9 의 명령 전체
 tests/test_ledger.py         [완료] 5 케이스
+tests/test_web.py            [완료] §11.3.1
 data/seed/<profile>/         [생성물] snapshot.json, ground_truth.json, profile.yaml (커밋함, 1.2MB)
 ```
 
@@ -307,13 +323,13 @@ stub 파일의 함수 시그니처는 **계약**이다. 바꿔야 하면 이 문
 경로 p, 날짜 d 에 대해 순서 고정. **생성기와 동일**.
 
 1. **수입**: `d == next_income_date` 이면 `liquidity += expected_income`. 규칙적이면 다음 수입일 = +1개월 같은 일자. 불규칙이면 `+ median 간격` 이며 금액에 로그정규 잡음(sigma 0.4) 을 준다.
-2. **고정비**: 큐에서 `due == d` 인 항목. 계좌 항목 → `liquidity −= amount`. 카드 항목(통신/구독) → 해당 카드 `unbilled += amount`. 카드대금 항목은 4에서 처리.
+2. **고정비**: 큐에서 `due == d` 인 항목. 계좌 항목은 `cash >= amount` 일 때만 `liquidity −= amount` 하고, 부족하면 거절되어 잔액을 바꾸지 않는다. 카드 항목(통신/구독) → 해당 카드 `unbilled += amount`. 카드대금 항목은 4에서 처리.
 3. **청구서 발행**: `d.weekday()==0` 이면 카드별 `issued.append(unbilled)`, `unbilled = 0`.
-4. **카드 출금**: 카드별 `d.weekday()==withdrawal_weekday` **또는** 미결제 청구서가 발행 7일 이상 경과(재시도) 이면, 발행일 ≤ d 인 미결제 청구서를 오래된 것부터 `liquidity −= total`. 결제 후 `liquidity < 0` 이면 `card_shortfall[p]=True`, 그 청구서는 미결제로 남기고 `liquidity` 는 되돌린다(출금 안 됨). 재시도는 매일.
+4. **카드 출금**: 카드별 `d.weekday()==withdrawal_weekday` **또는** 미결제 청구서가 발행 7일 이상 경과(재시도) 이면, 발행일 ≤ d 인 미결제 청구서를 오래된 것부터 시도한다. `cash >= total` 이면 `liquidity −= total` 하고 청구서를 제거하고, 부족하면 `card_shortfall[p]=True` 로 기록하되 잔액은 바꾸지 않고 청구서를 남긴다. 재시도는 매일.
 5. **소비**: 봉투별 `λ = daily_rate × weekday_mult[wd] × boost × elasticity_gate`.
    - `boost = payday_boost` if 최근 수입 후 7일 이내 else 1.
    - `elasticity_gate = elasticity` if 봉투 `remaining_ratio < 0.2` else 1. (remaining 은 경로별로 추적: `budget − (spent_this_month + 시뮬 지출)`. 달이 바뀌면 spent 0으로 리셋.)
-   - `n ~ Poisson(λ)`, 각 건 금액 `~ LogNormal(mu, sigma)` 100원 반올림. 카드 비율만큼 `unbilled` 로, 나머지 `liquidity` 에서 즉시 차감. 잔액 부족이어도 차감한다(음수 허용, 부족 크기 측정 목적).
+   - `n ~ Poisson(λ)`, 각 건 금액 `~ LogNormal(mu, sigma)` 100원 반올림. 카드 비율만큼 `unbilled` 로, 나머지는 `cash >= amount` 일 때만 `liquidity` 에서 즉시 차감한다. 잔액이 부족한 체크성 지출은 거절되어 잔액·봉투 누적에 반영하지 않는다(`declined_debits` 와 같은 가정).
    - 봉투별 지출 누적 `envelope_spend[p, e] += Σ`.
 6. **돌발**: `Bernoulli(shock_daily_prob)` → `LogNormal(shock_mu, shock_sigma)`, 카드 비율은 전체 평균. 봉투 `기타` 로 누적.
 7. **가상 지출 주입**(What-if): `injections` 중 `on == d` 인 건을 5 와 같은 방식으로 적용(카드면 `unbilled`).
@@ -485,7 +501,9 @@ LLM 에 노출하는 함수. 모두 `TwinContext` 의 결정론 함수를 감싼
 
 ---
 
-## 9. CLI (`fdt/cli.py`)
+## 9. 실행 인터페이스
+
+### 9.1 CLI (`fdt/cli.py`)
 
 | 명령 | 동작 |
 | --- | --- |
@@ -499,14 +517,72 @@ LLM 에 노출하는 함수. 모두 `TwinContext` 의 결정론 함수를 감싼
 | `fdt brief <seed_dir> [--persona]` | 에이전트 브리핑 |
 | `fdt chat <seed_dir> [--persona]` | 대화 REPL |
 | `fdt eval backtest|calibration|faithfulness|routing` | §11 평가 실행, JSON 보고서 `data/out/eval/*.json` |
+| `fdt serve [--host 127.0.0.1] [--port 8787]` | §9.2 로컬 대시보드 실행 |
 
-모든 명령은 `--as-of YYYY-MM-DD` 를 받으며 기본값은 원장 마지막 거래일. 출력은 `PYTHONIOENCODING=utf-8` 환경에서 깨지지 않아야 한다(Windows).
+금융 계산 명령은 `--as-of YYYY-MM-DD` 를 받으며 기본값은 원장 마지막 거래일. 출력은 `PYTHONIOENCODING=utf-8` 환경에서 깨지지 않아야 한다(Windows).
+
+### 9.2 로컬 대시보드와 HTTP 연동
+
+#### 9.2.1 기준과 범위
+
+- 참고 UI: `C:/Users/SSAFY/Desktop/KeyFin_Local_Agent/app/static/` 의 3열 구조(프로필 선택 / 고양이 채팅 / 금융 상태·봉투)와 결과 카드·선 그래프 흐름.
+- 구현은 이 저장소의 `fdt/static/` 에 자체 포함한다. 실행 시 다른 저장소의 파일이나 서버를 참조하지 않는다.
+- 프런트엔드는 빌드 없는 HTML/CSS/JavaScript 로 유지한다. React/Vite/Node 의존성은 추가하지 않는다.
+- 좌측에서 **금융 사용자 프로필** A/B/C와 **코치 페르소나** 도도냥/온순냥/지방냥을 별도 선택한다. 둘을 같은 "페르소나"로 합치지 않는다.
+- 중앙은 정적 고양이, 채팅, 빠른 질문, 도구 실행 경로를 표시한다. 우측은 기준일, 유동성, 비상금, 다음 수입, 약정 지출, 위험도와 7개 봉투를 표시한다.
+- 상단 상태 표시는 `DEMO`/`LIVE`, 기준일, 엔진 준비 여부, LLM 모델 또는 `template fallback` 을 분리해 표시한다. v1.0 데이터는 `DEMO`이며 LIVE 연결 전에는 LIVE로 표시하지 않는다.
+
+#### 9.2.2 HTTP 인터페이스 (`fdt/web.py`)
+
+기본 주소는 `http://127.0.0.1:8787` 이다. 정적 파일과 JSON 인터페이스를 같은 FastAPI 프로세스가 제공한다.
+
+| 메서드·경로 | 입력 | 출력·역할 |
+| --- | --- | --- |
+| `GET /` | 없음 | `fdt/static/index.html` |
+| `GET /api/health` | 없음 | `ok`, `source`, `engine_ready`, `llm_ready`, `llm_model`, `fallback` |
+| `GET /api/profiles` | 없음 | A/B/C 프로필의 id·이름·설명 목록 |
+| `GET /api/profiles/{profile_id}` | `as_of` 선택 | 프로필 메타 + `State` + `RiskResult` + `RoomProjection` JSON |
+| `POST /api/chat/start` | `profile_id`, `coach_persona`, `as_of` 선택 | 메모리 세션 생성, `session_id`와 첫 인사 |
+| `POST /api/chat/message` | `session_id`, `message`(1~1000자) | 코칭 문장, 실행 툴, 엔진 원본 결과, 시각화 명세 |
+| `POST /api/chat/end` | `session_id` | 세션 삭제 확인 |
+
+`/api/chat/message` 응답의 최소 계약:
+
+```json
+{
+  "message": "오늘은 1만 9천원 안에서 쓰자냥.",
+  "route": ["safe_to_spend", "coach"],
+  "results": [{"tool": "safe_to_spend", "data": {}, "visualization": null}],
+  "faithful": true,
+  "fallback": false
+}
+```
+
+`data` 는 `execute_tool` 의 `model_dump(mode="json")` 결과를 그대로 넣는다. `web.py` 는 키 이름을 복제 계산하지 않고, 시각화 명세만 다음처럼 변환한다.
+
+| 툴 결과 | 대시보드 표현 |
+| --- | --- |
+| `get_state`, `safe_to_spend` | 금액 카드와 봉투 진행 막대 |
+| `forecast_balance` | 날짜별 P50 선 + P10~P90 범위 |
+| `what_if` | 기본/구매 후 비교 막대 + 위험도 델타 |
+| `payment_risk` | 위험 점수·부족 확률·예상 부족액 카드 |
+| `goal_plan` | 주차별 상한 표와 달성 가능 여부 |
+| `spending_alerts`, `rebalance`, `room_state` | 알림·이동안·날씨/표정/행동 상태 카드 |
+
+#### 9.2.3 세션과 실패 처리
+
+1. 시작 시 `data/seed/<profile>/snapshot.json` 을 인입하고 선택 `as_of` 로 `State`, `Behavior`, `TwinContext`, `FdtAgent` 를 한 번 만든다.
+2. 세션은 단일 프로세스 메모리 dict 에 저장한다. 같은 세션의 메시지는 lock 으로 직렬화해 history 순서를 보장한다. `chat/end` 또는 프로세스 종료 시 사라진다.
+3. What-if 는 세션의 원장·State 를 변경하지 않는다. §4 불변 원칙대로 복사본에서만 실행한다.
+4. 없는 프로필·세션은 404, 잘못된 입력은 422, 엔진 로드 실패는 503이다.
+5. LLM 미가동은 장애가 아니다. HTTP 200과 `fallback=true` 로 규칙 라우터·템플릿 코칭을 반환한다. 엔진이 계산하지 못할 때만 503이다.
+6. 기본 host는 `127.0.0.1` 이다. v1.0 은 인증이 없으므로 외부 공개 바인딩과 실제 금융 데이터 사용을 금지한다.
 
 ---
 
 ## 10. 구현 기준 (MUST/SHOULD)
 
-**언어·도구**: Python 3.12, uv, pydantic v2, numpy, pandas(선택), pyyaml, httpx, typer, pytest. 새 의존성 추가는 `pyproject.toml` 에 이유 주석과 함께.
+**언어·도구**: Python 3.12, uv, pydantic v2, numpy, pandas(선택), pyyaml, httpx, typer, FastAPI, uvicorn, pytest. 대시보드는 바닐라 HTML/CSS/JavaScript이며 npm 의존성은 없다. 새 의존성 추가는 `pyproject.toml` 에 이유 주석과 함께.
 
 **코드 규약**
 - MUST 타입 힌트 전부. `from __future__ import annotations`.
@@ -514,6 +590,8 @@ LLM 에 노출하는 함수. 모두 `TwinContext` 의 결정론 함수를 감싼
 - MUST 난수는 `np.random.default_rng(seed)` 를 함수 인자로 받은 시드로 생성. 전역 상태 금지. `random`, `hash()` 금지(재현성. 실제 사고 있었음).
 - MUST `twin/`, `ledger/`, `data/` 에서 `fdt.agent` import 금지. 검사: `tests/test_architecture.py` 가 import 그래프를 확인한다.
 - MUST 트윈 코드에서 `ground_truth.json`, 프로필 YAML 의 `spending` 읽기 금지.
+- MUST `web.py` 와 `static/` 에 금융 판정 공식을 복제하지 않는다. 모든 숫자와 상태 판정은 코어 결과를 사용한다.
+- MUST `fdt serve` 기본 바인딩은 `127.0.0.1`. 인증 구현 전 `0.0.0.0` 을 기본값으로 쓰지 않는다.
 - MUST 공개 함수는 docstring 첫 줄에 설계서 절 번호(예 `§7.6.1`).
 - SHOULD 함수 60줄 이내, 모듈 500줄 이내. 넘으면 분리.
 - SHOULD 예외는 도메인 예외(`FdtError` 계층)로 감싸고 메시지에 as_of, 프로필 id 포함.
@@ -579,7 +657,7 @@ LLM 에 노출하는 함수. 모두 `TwinContext` 의 결정론 함수를 감싼
 - `check_faithful`: 만원 허용 오차 경계(±5,000), 없는 숫자 검출.
 - 템플릿 폴백: 전 의도 × 전 페르소나 충실도 100%.
 
-`tests/test_architecture.py`: import 그래프(§10), stub 잔존(`NotImplementedError`) 0건 — 최종 단계에서 활성화.
+`tests/test_architecture.py`: import 그래프(§10), stub 잔존(`NotImplementedError`) 0건 — 최종 단계 검사 활성화 완료.
 
 ### 11.2 불변식(속성) 테스트
 
@@ -593,6 +671,17 @@ LLM 에 노출하는 함수. 모두 `TwinContext` 의 결정론 함수를 감싼
 ### 11.3 통합 테스트
 
 `tests/test_pipeline.py`: `gen(짧은 기간, 임시 디렉터리) → ingest → state → forecast/risk/analyze → project_room → 템플릿 코칭` 이 3 프로필에서 예외 없이 끝나고 결과 JSON 이 스키마를 만족한다. LLM 은 사용하지 않는다.
+
+### 11.3.1 대시보드·HTTP 통합 테스트
+
+`tests/test_web.py` 는 LLM 없이 실제 A/B/C seed를 사용해 다음을 검증한다.
+
+- `/`, 정적 CSS/JS, `/api/health`, `/api/profiles` 가 200이고 한글 UTF-8과 JSON 직렬화를 만족한다.
+- 금융 프로필과 코치 페르소나 선택이 분리되며, `as_of` 이후 거래가 상태·화면 JSON 에 섞이지 않는다.
+- start → message(상태/예측/What-if/목표 각 1건) → end 흐름이 동작하고 응답에 `faithful`, `fallback`, `route`, `results` 가 항상 있다.
+- 잘못된 프로필·세션·날짜·금액은 404/422이다. 같은 세션의 동시 메시지는 순서대로 처리된다.
+- LLM 미가동 시 200 + `fallback=true`, 엔진 로드 실패 시 503으로 구분한다.
+- JavaScript가 참조하는 HTTP 경로와 서버 route 목록이 일치한다. 시각·반응형·키보드 조작은 실제 브라우저에서 별도 확인한다.
 
 ### 11.4 백테스트 (SIM-01 정확도) — `eval/backtest.py`
 
@@ -652,6 +741,7 @@ C 는 불규칙 수입 때문에 기준이 느슨하다. 커버리지 상한은 
 | `build_state` + `estimate_behavior` (6개월 원장) | < 1초 |
 | `simulate` 1000경로 × 30일 | < 2초 |
 | `what_if` (2회 시뮬) | < 4초 |
+| 프로필 대시보드 초기 JSON(State + Risk + Room) | < 3초 |
 | 캘리브레이션 전체(23×~12 as_of) | < 15분 |
 | LLM 툴 선택 + 코칭 (GPU) | < 20초/턴 |
 
@@ -675,6 +765,10 @@ C 는 불규칙 수입 때문에 기준이 느슨하다. 커버리지 상한은 
 - [ ] 필수 봉투에서 재배분으로 빼는 경로가 없는가.
 - [ ] 우려 결제 규칙에 `3 × pace_unit` 정규화가 있는가.
 - [ ] 코칭 결과에 `faithful/fallback` 플래그가 항상 있는가. 검사 실패를 조용히 통과시키는 코드가 없는가.
+- [ ] 대시보드가 코어 숫자·위험 판정을 JavaScript나 `web.py`에서 다시 계산하지 않는가.
+- [ ] 금융 프로필과 코치 페르소나가 UI·HTTP 입력에서 분리되어 있는가.
+- [ ] `DEMO`/`LIVE`, 엔진 준비, LLM/fallback 상태가 화면에서 구분되는가.
+- [ ] 기본 host가 `127.0.0.1` 이고 LLM 장애와 엔진 장애의 HTTP 상태가 §9.2.3과 같은가.
 - [ ] LLM 미가동 시 전체 CLI 가 동작하는가.
 - [ ] 금액 int, 100원/1,000원/만원 단위 규칙이 문서와 같은가.
 - [ ] 테스트가 §11.1 목록을 모두 포함하고 통과하는가. 벤치 수치가 §11.8 안인가.
@@ -693,9 +787,10 @@ C 는 불규칙 수입 때문에 기준이 느슨하다. 커버리지 상한은 
 | T5 Tools + Coach(검사·템플릿) | `agent/tools.py`, `agent/coach.py`, `agent/llm.py`, `tests/test_tools.py`, `tests/test_coach.py` | T1~T4 함수 시그니처(확정) | LLM 없이 전 테스트 통과, 템플릿 충실도 100% |
 | T6 Agent + CLI | `agent/agent.py`, `cli.py` | T5 | `fdt brief/chat/analyze/...` 동작, LLM 유무 양쪽 |
 | T7 Eval | `eval/*.py`, `data/eval/*.yaml`, `tests/test_pipeline.py` | T1~T6 | 4종 보고서 생성, 기준 충족 여부 표 |
-| T8 마감 | `tests/test_architecture.py`, README, 이 문서 갱신 | 전부 | stub 0건, 전체 테스트 통과 |
+| T8 Dashboard | `web.py`, `static/*`, `tests/test_web.py`, `cli.py`의 serve 명령 | T1~T6 공개 함수 | §9.2 HTTP 계약, A/B/C 브라우저 흐름, LLM 유무 양쪽 통과 |
+| T9 마감 | `tests/test_architecture.py`, README, 이 문서 갱신 | 전부 | stub 0건, 전체 테스트 통과 |
 
-병렬 규칙: T1/T2/T3 동시 가능(T3 는 fixture 로 시작). T4 는 T3 뒤. T5 는 T1~T4 의 **시그니처**만 있으면 시작 가능(결과 dict 는 스키마에서 생성). 공용 파일 수정 필요 시 §10 규칙.
+병렬 규칙: T1/T2/T3 동시 가능(T3 는 fixture 로 시작). T4 는 T3 뒤. T5 는 T1~T4 의 **시그니처**만 있으면 시작 가능(결과 dict 는 스키마에서 생성). T8 정적 UI는 먼저 만들 수 있지만 실제 연동 완료 판정은 T1~T6 뒤에만 한다. 공용 파일 수정 필요 시 §10 규칙.
 
 각 작업의 마지막 커밋 메시지 예: `기능: State(t) 산출과 예산 제안 구현 (FDT 설계 §7.1, FR-BGT-01)`.
 
@@ -712,6 +807,9 @@ C 는 불규칙 수입 때문에 기준이 느슨하다. 커버리지 상한은 
 | R5 | 봉투 예산 주기가 달력 월인데 급여일이 25일/10일 | 월초 진행률 기반 규칙이 급여 주기와 어긋남 | v1.0 은 달력 월 고정. 급여 주기 옵션은 v1.1 |
 | R6 | 돌발 지출이 봉투 추정에 이중 계상 | 예측이 약간 보수적 | 백테스트 커버리지로 감시 |
 | R7 | qwen3:8b 등 대체 모델 | 한국어 품질 | 라우팅·충실도 평가를 모델별로 돌려 표로 비교 후 결정 |
+| R8 | 코어 결과와 대시보드 JSON 불일치 | 화면은 보이지만 숫자 의미가 달라짐 | `model_dump` 원본 전달 + `tests/test_web.py` 계약 테스트, UI 재계산 금지 |
+| R9 | 금융 프로필과 코치 페르소나 혼동 | 개인화 기준과 말투가 뒤섞임 | 선택 UI·요청 필드·표시명을 분리 |
+| R10 | 인증 없는 로컬 서버 외부 노출 | 더미 또는 향후 LIVE 금융정보 노출 | 기본 `127.0.0.1`, v1.0 외부 공개 금지. 운영화 시 인증·권한·CSRF를 별도 설계 |
 
 ---
 
