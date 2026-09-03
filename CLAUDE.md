@@ -20,11 +20,23 @@ KeyFin은 "소비 내역을 분석해 카테고리별 예산을 안내하고, �
 
 ### 참고 문서
 
+- **`docs/03_FDT_설계.md` : 구현의 단일 기준 설계서.** 모듈 책임, 공식, 전이 규칙, 툴 정의, 테스트·평가 기준, 작업 분할(WBS)이 전부 여기 있다. 구현 에이전트는 이 문서를 먼저 읽고 담당 절 번호를 따른다.
+
 - `docs/01_KeyFin_기획의도.md` : 서비스 기획 배경과 기능 개요
 - `docs/02_KeyFin_요구사항명세.md` : 요구사항 명세 (FR/NFR, P0~P2 우선순위)
 - `docs/FDT.md` : 디지털 트윈 기능 명세서 (FDT-INP / SIM / ANL / INT 기능 ID)
 
 기능을 구현할 때는 위 문서의 기능 ID(예: `FDT-SIM-02`, `FR-BGT-01`)를 기준으로 범위를 잡고, 커밋 메시지·코드 주석에서도 해당 ID를 참조한다.
+
+## 구현 에이전트 규칙 (요약. 상세는 설계서 §10, §12, §13)
+
+- `fdt/twin`, `fdt/ledger`, `fdt/data` 는 LLM 을 import 하지 않는다. 숫자는 여기서만 만든다. `fdt/agent` 는 숫자를 계산하지 않는다.
+- 트윈 코드는 `ground_truth.json` 과 프로필 YAML 의 `spending` 을 읽지 않는다 (순환 검증 금지).
+- 난수는 인자로 받은 시드로 `np.random.default_rng`. `random`, `hash()` 금지.
+- 모든 원장 접근은 `as_of` 필터를 지킨다 (홀드아웃 누수 금지).
+- stub 함수의 시그니처는 계약이다. 바꾸려면 설계서를 먼저 고치고 "설계 변경" 커밋을 별도로 낸다.
+- 담당 파일(설계서 §13)만 수정한다. 테스트가 깨진 상태로 push 하지 않는다.
+- 실행: `.venv/Scripts/python -m pytest -q`, `PYTHONIOENCODING=utf-8 .venv/Scripts/python -m fdt.cli ...`
 
 ## Git 규칙
 
