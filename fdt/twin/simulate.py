@@ -45,7 +45,7 @@ class _Schedules:
 class SimulationResult:
     dates: list[date]
     balances: np.ndarray          # shape (n_paths, horizon+1), primary 현금 잔액
-    economic_balances: np.ndarray  # 현금 잔액 - 미결제 카드부채
+    economic_balances: np.ndarray  # 현금 잔액 - 미결제 카드부채·현금 의무
     card_shortfall: np.ndarray    # shape (n_paths,), 카드 출금일 부족
     any_shortfall: np.ndarray     # shape (n_paths,), 어느 날이든 잔액 < 0
     first_shortfall_idx: np.ndarray  # shape (n_paths,), 없으면 -1
@@ -238,6 +238,7 @@ def _add_random_spend(
     liquidity: np.ndarray,
     unbilled: np.ndarray,
     card_liability: np.ndarray,
+    suppressed_demand: np.ndarray,
     month_spent: np.ndarray,
     envelope_spend: np.ndarray,
 ) -> None:
@@ -265,6 +266,7 @@ def _add_random_spend(
         amount = int(amount)
         if not is_card:
             if cash[path] < amount:
+                suppressed_demand[path] += amount
                 continue
             cash[path] -= amount
             liquidity[path] -= amount
@@ -320,6 +322,7 @@ def _apply_injections(
     liquidity: np.ndarray,
     unbilled: np.ndarray,
     card_liability: np.ndarray,
+    suppressed_demand: np.ndarray,
     month_spent: np.ndarray,
     envelope_spend: np.ndarray,
     env_index: dict[Envelope, int],
@@ -329,14 +332,18 @@ def _apply_injections(
         if amount < 0:
             raise ValueError("VirtualSpend.amount must be non-negative")
         env_idx = env_index[injection.envelope]
-        month_spent[:, env_idx] += amount
-        envelope_spend[:, env_idx] += amount
         if injection.via_card and unbilled.shape[1]:
             unbilled[:, 0] += amount
             card_liability += amount
+            month_spent[:, env_idx] += amount
+            envelope_spend[:, env_idx] += amount
         else:
-            cash -= amount
-            liquidity -= amount
+            accepted = cash >= amount
+            cash[accepted] -= amount
+            liquidity[accepted] -= amount
+            month_spent[accepted, env_idx] += amount
+            envelope_spend[accepted, env_idx] += amount
+            suppressed_demand[~accepted] += amount
 
 
 def simulate(
@@ -359,6 +366,8 @@ def simulate(
     liquidity = cash.copy()
     card_shortfall = np.zeros(n_paths, dtype=bool)
     envelope_spend = np.zeros((n_paths, len(ENVELOPES)), dtype=np.int64)
+    unpaid_cash_obligation = np.zeros(n_paths, dtype=np.int64)
+    suppressed_demand = np.zeros(n_paths, dtype=np.int64)
     rates, weekday, amount_mu, amount_sigma, card_share, boost, elasticity, budgets, initial_spent = _model_arrays(state, behavior)
     month_spent = np.broadcast_to(initial_spent, (n_paths, len(ENVELOPES))).copy()
     unbilled = np.tile(np.asarray([[max(0, int(c.unbilled)) for c in state.cards]], dtype=np.int64), (n_paths, 1))
@@ -380,12 +389,12 @@ def simulate(
         injection_map.setdefault(injection.on, []).append(injection)
     _apply_injections(
         state.as_of, injection_map, cash, liquidity, unbilled, card_liability,
-        month_spent, envelope_spend, env_index,
+        suppressed_demand, month_spent, envelope_spend, env_index,
     )
     balances = np.empty((n_paths, horizon_days + 1), dtype=np.int64)
     economic_balances = np.empty((n_paths, horizon_days + 1), dtype=np.int64)
     balances[:, 0] = liquidity
-    economic_balances[:, 0] = liquidity - card_liability
+    economic_balances[:, 0] = liquidity - card_liability - unpaid_cash_obligation - suppressed_demand
     any_shortfall = liquidity < 0
     first_shortfall = np.where(any_shortfall, 0, -1).astype(np.int64)
     last_income = max((d for d in behavior.income_dates if d <= state.as_of), default=None)
@@ -414,6 +423,7 @@ def simulate(
                 accepted = cash >= amount
                 cash[accepted] -= amount
                 liquidity[accepted] -= amount
+                unpaid_cash_obligation[~accepted] += amount
         for due, card_idx, amount in schedules.card_fixed:
             if due == day and card_idx < unbilled.shape[1]:
                 unbilled[:, card_idx] += amount
@@ -440,21 +450,24 @@ def simulate(
             _add_random_spend(
                 rng, rng.poisson(np.maximum(0.0, lam), n_paths), amount_mu[env_idx], amount_sigma[env_idx],
                 card_share[env_idx], env_idx, cash, liquidity, unbilled, card_liability,
-                month_spent, envelope_spend,
+                suppressed_demand, month_spent, envelope_spend,
             )
         shock = rng.random(n_paths) < float(np.clip(behavior.shock_daily_prob, 0.0, 1.0))
         if shock.any():
             _add_random_spend(
                 rng, shock.astype(np.int64), behavior.shock_amount_mu, behavior.shock_amount_sigma,
                 float(np.mean(card_share)) if len(state.cards) else 0.0, env_index[Envelope.ETC],
-                cash, liquidity, unbilled, card_liability, month_spent, envelope_spend,
+                cash, liquidity, unbilled, card_liability, suppressed_demand,
+                month_spent, envelope_spend,
             )
         _apply_injections(
             day, injection_map, cash, liquidity, unbilled, card_liability,
-            month_spent, envelope_spend, env_index,
+            suppressed_demand, month_spent, envelope_spend, env_index,
         )
         balances[:, index] = liquidity
-        economic_balances[:, index] = liquidity - card_liability
+        economic_balances[:, index] = (
+            liquidity - card_liability - unpaid_cash_obligation - suppressed_demand
+        )
         newly_short = (liquidity < 0) & (first_shortfall < 0)
         first_shortfall[newly_short] = index
         any_shortfall |= liquidity < 0
@@ -497,12 +510,12 @@ def what_if(state: State, behavior: Behavior, injections: list[VirtualSpend], ho
 def risk(state: State, behavior: Behavior, horizon_days: int = 30, n_paths: int = 1000, seed: int = 42) -> RiskResult:
     """§7.4 FDT-SIM-03 부족 확률·위험 점수·예상 부족액을 반환한다."""
     result = simulate(state, behavior, horizon_days, n_paths, seed)
-    stats = result.stats()
+    stats = result.stats(economic=True)
     score = int(np.rint(100 * max(stats.card_shortfall_prob, 0.6 * stats.shortfall_prob)))
     score = max(0, min(100, score))
     level = "SAFE" if score < 20 else "WARNING" if score < 50 else "DANGER"
-    minima = np.min(result.balances, axis=1)
-    shortfalls = minima[result.any_shortfall]
+    minima = np.min(result.economic_balances, axis=1)
+    shortfalls = minima[minima < 0]
     expected = int(np.rint(np.mean(np.abs(shortfalls)))) if shortfalls.size else 0
     return RiskResult(
         horizon_days=horizon_days,

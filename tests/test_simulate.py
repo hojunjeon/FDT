@@ -59,6 +59,22 @@ def _behavior(*, income_dates: list[date] | None = None, irregular: bool = False
     )
 
 
+def _deterministic_cash_behavior() -> Behavior:
+    return Behavior(
+        estimated_from=date(2026, 1, 1), estimated_to=date(2026, 3, 1), n_days=60,
+        envelopes=[
+            EnvelopeBehavior(
+                envelope=env, daily_rate=0.5 if env == Envelope.DINING else 0,
+                weekday_mult=[1] * 7, amount_mu=float(np.log(100)), amount_sigma=0,
+                card_share=0, payday_boost=1, elasticity=1,
+            )
+            for env in ENVELOPES
+        ],
+        income_dates=[], income_amount_median=0, irregular_income=True,
+        shock_daily_prob=0, shock_amount_mu=float(np.log(100)), shock_amount_sigma=0,
+    )
+
+
 def test_seed_reproducibility_and_stats_shape() -> None:
     state = _state(liquidity=100000)
     behavior = _behavior(rates=0.5)
@@ -191,6 +207,63 @@ def test_what_if_applies_day_zero_and_extends_to_injection_date() -> None:
     assert distant.branch.median[-1] == distant.base.median[-1] - 100
 
 
+def test_rejected_cash_demand_is_kept_in_economic_balance_for_crn() -> None:
+    state = _state(liquidity=100)
+    behavior = _deterministic_cash_behavior()
+    injection = VirtualSpend(amount=50, envelope=Envelope.DINING, on=state.as_of, via_card=False)
+    base = simulate(state, behavior, horizon_days=1, n_paths=1, seed=0)
+    branch = simulate(state, behavior, horizon_days=1, n_paths=1, seed=0, injections=[injection])
+    result = what_if(state, behavior, [injection], horizon_days=1, n_paths=1, seed=0)
+
+    assert base.balances[0].tolist() == [100, 0]
+    assert branch.balances[0].tolist() == [50, 50]
+    assert base.economic_balances[0].tolist() == [100, 0]
+    assert branch.economic_balances[0].tolist() == [50, -50]
+    assert result.branch.min_balance <= result.base.min_balance
+    assert result.delta_min_balance == -50
+
+
+def test_rejected_fixed_debit_is_an_economic_obligation_only() -> None:
+    as_of = date(2026, 3, 1)
+    state = _state(
+        as_of=as_of, liquidity=1000,
+        committed=[FixedCommitment(kind="월세", name="월세", amount=950, due=as_of + timedelta(days=1), account_no="primary")],
+    )
+    injection = VirtualSpend(amount=100, envelope=Envelope.DINING, on=as_of, via_card=False)
+    result = what_if(state, _behavior(), [injection], horizon_days=1, n_paths=1, seed=0)
+
+    assert result.base.median == [1000, 50]
+    assert result.branch.median == [900, -50]
+    assert result.base.median == result.base.p10 == result.base.p90
+    assert result.base.min_balance == 50
+    assert result.branch.min_balance == -50
+    assert result.branch.min_balance <= result.base.min_balance
+    assert result.delta_min_balance == -100
+
+
+def test_cash_and_card_injections_at_boundary_days_do_not_reduce_risk() -> None:
+    as_of = date(2026, 3, 1)
+    behavior = _behavior()
+    for via_card in (False, True):
+        cards = [CardState(
+            card_no="card", withdrawal_account_no="primary", withdrawal_weekday=3,
+            unbilled=0, issued_unpaid=[],
+        )] if via_card else []
+        state = _state(liquidity=1000, cards=cards)
+        for offset in (0, 1, 60):
+            result = what_if(
+                state, behavior,
+                [VirtualSpend(
+                    amount=100, envelope=Envelope.DINING,
+                    on=as_of + timedelta(days=offset), via_card=via_card,
+                )],
+                horizon_days=1, n_paths=25, seed=0,
+            )
+            assert result.branch.min_balance <= result.base.min_balance
+            assert result.branch.shortfall_prob >= result.base.shortfall_prob
+            assert result.branch.card_shortfall_prob >= result.base.card_shortfall_prob
+
+
 def test_card_failure_does_not_reduce_balance_before_retry() -> None:
     as_of = date(2026, 3, 3)  # Tuesday; the next card withdrawal is Monday.
     card = CardState(
@@ -243,8 +316,11 @@ def test_insufficient_fixed_debit_is_not_posted() -> None:
         committed=[FixedCommitment(kind="월세", name="월세", amount=200, due=date(2026, 3, 2), account_no="primary")],
     )
     result = risk(state, _behavior(), horizon_days=1, n_paths=5, seed=3)
-    assert result.shortfall_prob == 0
+    raw = simulate(state, _behavior(), horizon_days=1, n_paths=1, seed=3)
+    assert raw.balances[0].tolist() == [100, 100]
+    assert raw.economic_balances[0].tolist() == [100, -100]
+    assert result.shortfall_prob == 1
     assert result.card_shortfall_prob == 0
-    assert result.risk_score == 0
-    assert result.level == "SAFE"
-    assert result.expected_shortfall == 0
+    assert result.risk_score == 60
+    assert result.level == "DANGER"
+    assert result.expected_shortfall == 100
