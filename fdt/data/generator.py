@@ -431,6 +431,7 @@ class Generator:
                     tx.cardStatus = "취소"
                     env = SUBCATEGORY_TO_ENVELOPE[MERCHANT_TO_SUBCATEGORY[tx.merchantName]]
                     self._month_spent[env] -= int(tx.transactionBalance)
+                    self.truth["envelope_true_spend"][today[:6]][str(env)] -= int(tx.transactionBalance)
                     self.truth["cancels"].append({"date": today, "merchant": tx.merchantName, "amount": int(tx.transactionBalance)})
         # 더치페이: 당일 외식 3만원 이상 결제 뒤 친구 입금
         dining = [x for c in self.cards for x in c.txs if x.transactionDate == today and x.cardStatus == "승인"

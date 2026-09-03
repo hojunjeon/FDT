@@ -130,10 +130,14 @@ SUMMARY_KEYWORDS: dict[str, Flow] = {
     "급여": Flow.INCOME, "월급": Flow.INCOME, "정산금": Flow.INCOME, "용역대금": Flow.INCOME,
     "프리랜서": Flow.INCOME, "외주": Flow.INCOME, "이자입금": Flow.INCOME,
     "카드대금": Flow.CARD_BILL, "카드청구": Flow.CARD_BILL,
-    "월세": Flow.FIXED, "관리비": Flow.FIXED, "대출이자": Flow.FIXED, "대출원리금": Flow.FIXED,
+    "월세": Flow.FIXED, "관리비": Flow.FIXED, "대출이자": Flow.FIXED, "대출원리금": Flow.FIXED, "보험료": Flow.FIXED,
     "비상금이체": Flow.TRANSFER_INTERNAL, "내계좌": Flow.TRANSFER_INTERNAL,
     "취소": Flow.REFUND, "환불": Flow.REFUND, "더치페이": Flow.REFUND,
 }
+
+
+# 요약 키워드 -> 고정비 종류
+FIXED_KIND_OF_KEYWORD: dict[str, str] = {"월세": "월세", "관리비": "관리비", "대출이자": "대출이자", "대출원리금": "대출이자", "보험료": "보험"}
 
 
 def envelope_of(subcategory: str) -> Envelope | None:
