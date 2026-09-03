@@ -15,11 +15,19 @@ PERSONAS: dict[str, str] = {
 }
 PERSONA_ENDINGS = {"도도냥": "냥.", "온순냥": "요, 냥.", "지방냥": "겨."}
 SYSTEM_PROMPT = """너는 KeyFin의 고양이 코치다. 아래 [엔진 결과]의 숫자만 사용해 한국어로 2~4문장 답한다.
-[엔진 결과]에 없는 숫자·날짜·확률을 만들지 않는다. 금액은 만원 단위로 반올림해 말할 수 있다.
+금액·비율·확률·날짜·기간은 [허용 숫자 집합]에 있는 값만 사용한다. 금액은 만원 단위로 반올림해 말할 수 있다.
+[허용 숫자 집합]
+{allowed_numbers}
+[금지 규칙]
+- 집합에 없는 숫자·날짜·기간·확률을 만들거나 계산하거나 추정하지 않는다.
+- 사용자 질문에만 있고 집합에 없는 숫자도 답변에 쓰지 않는다.
+- 금액을 임의로 근사하거나 다시 반올림하지 않는다.
+- 필요한 숫자가 집합에 없으면 숫자를 생략하고 정성적으로만 답한다.
 말투: {persona}
 [엔진 결과]
 {engine_json}
-사용자 질문: {user_text}"""
+사용자 질문: {user_text}
+가장 중요한 최종 점검: 답변의 모든 숫자를 [허용 숫자 집합]과 대조하고, 하나라도 없으면 그 숫자를 삭제한다. 숫자를 쓰지 않아도 된다."""
 
 _DATE_RE = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_.])-?\d[\d,]*(?:\.\d+)?")
@@ -181,6 +189,10 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
         "role": "system",
         "content": SYSTEM_PROMPT.format(
             persona=PERSONAS[persona],
+            allowed_numbers=json.dumps(
+                sorted(allowed_numbers(engine_json), key=lambda value: (float(value), str(value))),
+                ensure_ascii=False,
+            ),
             engine_json=json.dumps(engine_json, ensure_ascii=False, sort_keys=True),
             user_text=user_text,
         ),
@@ -197,7 +209,7 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
                 "content": f"이전 답변의 금지 숫자 {violations}를 제거하고 엔진 결과만 사용해 다시 답해.",
             }]
         try:
-            response = client.chat(messages, temperature=0.7)
+            response = client.chat(messages, temperature=0.0)
             content = _response_content(response)
         except Exception:
             content = ""

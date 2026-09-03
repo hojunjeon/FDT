@@ -67,13 +67,26 @@ class _FakeClient:
     def __init__(self, replies):
         self.replies = iter(replies)
         self.calls = 0
+        self.messages = []
+        self.kwargs = []
 
     def available(self):
         return True
 
     def chat(self, *args, **kwargs):
         self.calls += 1
+        self.messages.append(args[0])
+        self.kwargs.append(kwargs)
         return {"message": {"content": next(self.replies)}}
+
+
+def test_coach_prompt_lists_engine_numbers_and_forbids_new_values():
+    client = _FakeClient(["오늘은 1만 9천원 안에서 써요."])
+    coach(client, "온순냥", "safe_to_spend", {"safe_today": 19_000}, "얼마까지 써?")
+    prompt = client.messages[0][0]["content"]
+    assert "[허용 숫자 집합]" in prompt and "19000" in prompt
+    assert "집합에 없는 숫자·날짜·기간·확률을 만들거나" in prompt
+    assert client.kwargs[0]["temperature"] == 0.0
 
 
 def test_coach_retries_once_then_accepts_faithful_response():
