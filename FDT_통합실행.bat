@@ -7,6 +7,18 @@ set "FDT_PYTHON=%~dp0.venv\Scripts\python.exe"
 set "FDT_HOST=127.0.0.1"
 set "FDT_PORT=8787"
 set "FDT_PROBE_TIMEOUT=5"
+set "FDT_LOG_DIR=%~dp0log"
+if not exist "%FDT_LOG_DIR%" md "%FDT_LOG_DIR%" >nul 2>&1
+for /f "delims=" %%L in ('powershell.exe -NoLogo -NoProfile -Command "Get-Date -Format yyddMM-HHmm"') do set "FDT_LOG_STAMP=%%L"
+set "FDT_LOG_SUFFIX="
+set /a FDT_LOG_INDEX=1 >nul
+:log_path
+set "FDT_LOG_FILE=%FDT_LOG_DIR%\%FDT_LOG_STAMP%%FDT_LOG_SUFFIX%.log"
+if not exist "%FDT_LOG_FILE%" goto :log_ready
+set "FDT_LOG_SUFFIX=-%FDT_LOG_INDEX%"
+set /a FDT_LOG_INDEX+=1 >nul
+goto :log_path
+:log_ready
 if not defined FDT_OLLAMA_URL set "FDT_OLLAMA_URL=http://127.0.0.1:11434"
 if not defined FDT_LLM_MODEL set "FDT_LLM_MODEL=qwen2.5:7b-instruct-q4_K_M"
 
@@ -73,7 +85,8 @@ if errorlevel 1 echo [경고] 모델 "%FDT_LLM_MODEL%"이 없어 template fallba
 set "FDT_PROBE_TIMEOUT=5"
 echo.
 echo [시작] FDT 서버: http://%FDT_HOST%:%FDT_PORT%
-start "FDT Dashboard" "%FDT_PYTHON%" -m fdt.cli serve --host %FDT_HOST% --port %FDT_PORT%
+echo [로그] 실시간 저장: "%FDT_LOG_FILE%"
+start "FDT Dashboard" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& $env:FDT_PYTHON -m fdt.cli serve --host $env:FDT_HOST --port $env:FDT_PORT 2>&1 | Tee-Object -FilePath $env:FDT_LOG_FILE -Append"
 
 for /l %%N in (1,1,30) do (
   call :probe_marker "http://%FDT_HOST%:%FDT_PORT%/api/health" "fdt-local-dashboard"
@@ -90,7 +103,7 @@ exit /b 3
 start "" "http://%FDT_HOST%:%FDT_PORT%"
 echo.
 echo [완료] 대시보드를 열었습니다: http://%FDT_HOST%:%FDT_PORT%
-echo [안내] 서버 로그는 "FDT Dashboard" 창에 표시됩니다. 종료하려면 그 창을 닫으세요.
+echo [안내] 서버 로그는 "FDT Dashboard" 창과 "%FDT_LOG_FILE%"에 표시됩니다. 종료하려면 그 창을 닫으세요.
 pause
 exit /b 0
 
