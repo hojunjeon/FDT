@@ -1,0 +1,33 @@
+scenarios:
+  - {id: A-state, profile_id: A_steady, intent: get_state, utterance: "현재 금융 상태를 보여줘"}
+  - {id: A-forecast, profile_id: A_steady, intent: forecast_balance, utterance: "앞으로 30일 잔액을 예측해줘", args: {horizon_days: 30}}
+  - {id: A-what-if, profile_id: A_steady, intent: what_if, utterance: "다음 주에 15만원짜리 신발 사도 돼?", args: {amount: 150000, envelope: "쇼핑", days_from_now: 7, via_card: true}}
+  - {id: A-risk, profile_id: A_steady, intent: payment_risk, utterance: "다음 카드 결제일 부족 위험 알려줘"}
+  - {id: A-goal, profile_id: A_steady, intent: goal_plan, utterance: "12월까지 200만원 모으려면 어떻게 해야 해?", args: {target_amount: 2000000, target_date: "2026-12-31"}}
+  - {id: A-safe, profile_id: A_steady, intent: safe_to_spend, utterance: "이번 달 남은 돈 얼마야?"}
+  - {id: A-rebalance, profile_id: A_steady, intent: rebalance_envelopes, utterance: "예산 봉투를 재배분해줘"}
+  - {id: A-alerts, profile_id: A_steady, intent: spending_alerts, utterance: "최근 소비 알림을 보여줘", args: {days: 1}}
+  - {id: A-room, profile_id: A_steady, intent: room_status, utterance: "오늘 방 상태와 고양이 기분은?"}
+  - {id: A-policy, profile_id: A_steady, intent: policy_tips, utterance: "내게 맞는 정책 혜택 추천이 있어?"}
+
+  - {id: B-state, profile_id: B_card_crunch, intent: get_state, utterance: "현재 금융 상태를 보여줘"}
+  - {id: B-forecast, profile_id: B_card_crunch, intent: forecast_balance, utterance: "앞으로 30일 잔액을 예측해줘", args: {horizon_days: 30}}
+  - {id: B-what-if, profile_id: B_card_crunch, intent: what_if, utterance: "다음 주에 15만원짜리 신발 사도 돼?", args: {amount: 150000, envelope: "쇼핑", days_from_now: 7, via_card: true}}
+  - {id: B-risk, profile_id: B_card_crunch, intent: payment_risk, utterance: "다음 카드 결제일 부족 위험 알려줘"}
+  - {id: B-goal, profile_id: B_card_crunch, intent: goal_plan, utterance: "12월까지 200만원 모으려면 어떻게 해야 해?", args: {target_amount: 2000000, target_date: "2026-12-31"}}
+  - {id: B-safe, profile_id: B_card_crunch, intent: safe_to_spend, utterance: "이번 달 남은 돈 얼마야?"}
+  - {id: B-rebalance, profile_id: B_card_crunch, intent: rebalance_envelopes, utterance: "예산 봉투를 재배분해줘"}
+  - {id: B-alerts, profile_id: B_card_crunch, intent: spending_alerts, utterance: "최근 소비 알림을 보여줘", args: {days: 1}}
+  - {id: B-room, profile_id: B_card_crunch, intent: room_status, utterance: "오늘 방 상태와 고양이 기분은?"}
+  - {id: B-policy, profile_id: B_card_crunch, intent: policy_tips, utterance: "내게 맞는 정책 혜택 추천이 있어?"}
+
+  - {id: C-state, profile_id: C_impulsive, intent: get_state, utterance: "현재 금융 상태를 보여줘"}
+  - {id: C-forecast, profile_id: C_impulsive, intent: forecast_balance, utterance: "앞으로 30일 잔액을 예측해줘", args: {horizon_days: 30}}
+  - {id: C-what-if, profile_id: C_impulsive, intent: what_if, utterance: "다음 주에 15만원짜리 신발 사도 돼?", args: {amount: 150000, envelope: "쇼핑", days_from_now: 7, via_card: true}}
+  - {id: C-risk, profile_id: C_impulsive, intent: payment_risk, utterance: "다음 카드 결제일 부족 위험 알려줘"}
+  - {id: C-goal, profile_id: C_impulsive, intent: goal_plan, utterance: "12월까지 200만원 모으려면 어떻게 해야 해?", args: {target_amount: 2000000, target_date: "2026-12-31"}}
+  - {id: C-safe, profile_id: C_impulsive, intent: safe_to_spend, utterance: "이번 달 남은 돈 얼마야?"}
+  - {id: C-rebalance, profile_id: C_impulsive, intent: rebalance_envelopes, utterance: "예산 봉투를 재배분해줘"}
+  - {id: C-alerts, profile_id: C_impulsive, intent: spending_alerts, utterance: "최근 소비 알림을 보여줘", args: {days: 1}}
+  - {id: C-room, profile_id: C_impulsive, intent: room_status, utterance: "오늘 방 상태와 고양이 기분은?"}
+  - {id: C-policy, profile_id: C_impulsive, intent: policy_tips, utterance: "내게 맞는 정책 혜택 추천이 있어?"}

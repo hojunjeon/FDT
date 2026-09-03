@@ -1,0 +1,50 @@
+utterances:
+  - {id: state-01, tool: get_state, utterance: "내 금융 현황 알려줘", args: {}}
+  - {id: state-02, tool: get_state, utterance: "계좌 상태를 보여줘", args: {}}
+  - {id: state-03, tool: get_state, utterance: "지금 내 재정 상태가 어때?", args: {}}
+  - {id: state-04, tool: get_state, utterance: "전체 금융 요약해줘", args: {}}
+
+  - {id: forecast-01, tool: forecast_balance, utterance: "30일 잔액을 예측해줘", args: {horizon_days: 30}}
+  - {id: forecast-02, tool: forecast_balance, utterance: "앞으로 14일 잔액 전망은?", args: {horizon_days: 14}}
+  - {id: forecast-03, tool: forecast_balance, utterance: "미래 현금 흐름을 보여줘", args: {}}
+  - {id: forecast-04, tool: forecast_balance, utterance: "7일 뒤 잔액을 보고 싶어", args: {horizon_days: 7}}
+
+  - {id: what-if-01, tool: what_if, utterance: "다음 주에 15만원짜리 신발 사도 돼?", args: {amount: 150000, envelope: "쇼핑", days_from_now: 7, via_card: true}}
+  - {id: what-if-02, tool: what_if, utterance: "오늘 커피 3만원 써도 괜찮아?", args: {amount: 30000, envelope: "외식", days_from_now: 0, via_card: true}}
+  - {id: what-if-03, tool: what_if, utterance: "10일 뒤 여행에 30만원 쓰면 어떻게 돼?", args: {amount: 300000, envelope: "취미·여가", days_from_now: 10, via_card: true}}
+  - {id: what-if-04, tool: what_if, utterance: "내일 택시 5만원을 계좌로 결제해도 될까?", args: {amount: 50000, envelope: "교통비", days_from_now: 1, via_card: false}}
+
+  - {id: risk-01, tool: payment_risk, utterance: "카드값 결제 위험 알려줘", args: {}}
+  - {id: risk-02, tool: payment_risk, utterance: "결제 부족 확률이 얼마나 돼?", args: {}}
+  - {id: risk-03, tool: payment_risk, utterance: "30일 카드대금 리스크를 봐줘", args: {horizon_days: 30}}
+  - {id: risk-04, tool: payment_risk, utterance: "잔액이 마이너스 될 위험은?", args: {}}
+
+  - {id: goal-01, tool: goal_plan, utterance: "12월까지 200만원 모으려면?", args: {target_amount: 2000000, target_date: "2026-12-31"}}
+  - {id: goal-02, tool: goal_plan, utterance: "2026-11-30까지 100만원 저축 계획 세워줘", args: {target_amount: 1000000, target_date: "2026-11-30"}}
+  - {id: goal-03, tool: goal_plan, utterance: "9월 말까지 50만원 모을 수 있어?", args: {target_amount: 500000, target_date: "2026-09-30"}}
+  - {id: goal-04, tool: goal_plan, utterance: "200만원 목표를 위한 주간 한도 알려줘", args: {target_amount: 2000000}}
+
+  - {id: safe-01, tool: safe_to_spend, utterance: "오늘 쓸 수 있는 안심 한도 얼마야?", args: {}}
+  - {id: safe-02, tool: safe_to_spend, utterance: "이번 달 남은 돈이 얼마지?", args: {}}
+  - {id: safe-03, tool: safe_to_spend, utterance: "지금 편하게 써도 되는 금액은?", args: {}}
+  - {id: safe-04, tool: safe_to_spend, utterance: "다음 수입 전까지 하루에 얼마 쓸 수 있어?", args: {}}
+
+  - {id: rebalance-01, tool: rebalance_envelopes, utterance: "예산 봉투 재배분안을 보여줘", args: {}}
+  - {id: rebalance-02, tool: rebalance_envelopes, utterance: "남는 예산을 부족한 봉투로 옮겨줘", args: {}}
+  - {id: rebalance-03, tool: rebalance_envelopes, utterance: "이번 달 예산 조정이 필요할까?", args: {}}
+  - {id: rebalance-04, tool: rebalance_envelopes, utterance: "봉투별 예산을 다시 나눠줘", args: {}}
+
+  - {id: alerts-01, tool: spending_alerts, utterance: "최근 소비 알림 보여줘", args: {days: 1}}
+  - {id: alerts-02, tool: spending_alerts, utterance: "7일간 우려되는 결제가 있어?", args: {days: 7}}
+  - {id: alerts-03, tool: spending_alerts, utterance: "소비가 빨라졌는지 알려줘", args: {}}
+  - {id: alerts-04, tool: spending_alerts, utterance: "걱정되는 소비를 찾아줘", args: {}}
+
+  - {id: room-01, tool: room_status, utterance: "오늘 방 상태는 어때?", args: {}}
+  - {id: room-02, tool: room_status, utterance: "고양이 기분을 알려줘", args: {}}
+  - {id: room-03, tool: room_status, utterance: "내 금융 방 날씨는?", args: {}}
+  - {id: room-04, tool: room_status, utterance: "캐릭터가 지금 무엇을 하고 있어?", args: {}}
+
+  - {id: policy-01, tool: policy_tips, utterance: "받을 수 있는 정책 혜택이 있어?", args: {}}
+  - {id: policy-02, tool: policy_tips, utterance: "내게 맞는 금융 추천 알려줘", args: {}}
+  - {id: policy-03, tool: policy_tips, utterance: "지원 정책을 찾아줘", args: {}}
+  - {id: policy-04, tool: policy_tips, utterance: "절약 혜택 추천해줘", args: {}}
