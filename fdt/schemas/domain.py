@@ -53,6 +53,7 @@ class FixedCommitment(BaseModel):
     due: date
     account_no: str
     certainty: float = 1.0          # 카드대금 예정액처럼 추정치는 <1
+    card_no: str | None = None      # 카드 고정비·청구의 원 카드 식별자
 
 
 class EnvelopeState(BaseModel):
