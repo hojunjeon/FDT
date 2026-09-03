@@ -242,7 +242,7 @@ stub 파일의 함수 시그니처는 **계약**이다. 바꿔야 하면 이 문
 
 #### 7.1.3 약정 지출 큐 `build_committed_queue`
 
-`as_of+1` 부터 `horizon_days`(기본 35) 안에 나갈 항목:
+`as_of+1` 부터 `horizon_days`(기본 60) 안에 나갈 항목:
 
 | 종류 | 탐지 | 다음 예정일 | 금액 |
 | --- | --- | --- | --- |
@@ -323,17 +323,17 @@ stub 파일의 함수 시그니처는 **계약**이다. 바꿔야 하면 이 문
 경로 p, 날짜 d 에 대해 순서 고정. **생성기와 동일**.
 
 1. **수입**: `d == next_income_date` 이면 `liquidity += expected_income`. 규칙적이면 다음 수입일 = +1개월 같은 일자. 불규칙이면 `+ median 간격` 이며 금액에 로그정규 잡음(sigma 0.4) 을 준다.
-2. **고정비**: 큐에서 `due == d` 인 항목. 계좌 항목은 `cash >= amount` 일 때만 `liquidity −= amount` 하고, 부족하면 거절되어 잔액을 바꾸지 않는다. 카드 항목(통신/구독) → 해당 카드 `unbilled += amount`. 카드대금 항목은 4에서 처리.
+2. **고정비**: 큐에서 `due == d` 인 항목. 계좌 항목은 `cash >= amount` 일 때만 `liquidity −= amount` 하고, 부족하면 생성기와 같이 당일 1회 거절되어 실제 잔액을 바꾸지 않는다. 거절액은 경로별 `unpaid_cash_obligation` 으로 누적해 경제 잔액에서 차감하며, 고정비 재시도는 하지 않는다. 카드 항목(통신/구독) → 해당 카드 `unbilled += amount`. 카드대금 항목은 4에서 처리.
 3. **청구서 발행**: `d.weekday()==0` 이면 카드별 `issued.append(unbilled)`, `unbilled = 0`.
 4. **카드 출금**: 카드별 `d.weekday()==withdrawal_weekday` **또는** 미결제 청구서가 발행 7일 이상 경과(재시도) 이면, 발행일 ≤ d 인 미결제 청구서를 오래된 것부터 시도한다. `cash >= total` 이면 `liquidity −= total` 하고 청구서를 제거하고, 부족하면 `card_shortfall[p]=True` 로 기록하되 잔액은 바꾸지 않고 청구서를 남긴다. 재시도는 매일.
 5. **소비**: 봉투별 `λ = daily_rate × weekday_mult[wd] × boost × elasticity_gate`.
    - `boost = payday_boost` if 최근 수입 후 7일 이내 else 1.
    - `elasticity_gate = elasticity` if 봉투 `remaining_ratio < 0.2` else 1. (remaining 은 경로별로 추적: `budget − (spent_this_month + 시뮬 지출)`. 달이 바뀌면 spent 0으로 리셋.)
-   - `n ~ Poisson(λ)`, 각 건 금액 `~ LogNormal(mu, sigma)` 100원 반올림. 카드 비율만큼 `unbilled` 로, 나머지는 `cash >= amount` 일 때만 `liquidity` 에서 즉시 차감한다. 잔액이 부족한 체크성 지출은 거절되어 잔액·봉투 누적에 반영하지 않는다(`declined_debits` 와 같은 가정).
+   - `n ~ Poisson(λ)`, 각 건 금액 `~ LogNormal(mu, sigma)` 100원 반올림. 카드 비율만큼 `unbilled` 로, 나머지는 `cash >= amount` 일 때만 `liquidity` 에서 즉시 차감한다. 잔액이 부족한 체크성 지출은 실제 잔액·봉투 누적에는 반영하지 않고, 공통 난수(CRN) 비교를 위해 `suppressed_demand[p]` 에 경제적 의무로 누적해 경제 잔액에서 차감한다(`declined_debits` 와 같은 가정).
    - 봉투별 지출 누적 `envelope_spend[p, e] += Σ`.
 6. **돌발**: `Bernoulli(shock_daily_prob)` → `LogNormal(shock_mu, shock_sigma)`, 카드 비율은 전체 평균. 봉투 `기타` 로 누적.
-7. **가상 지출 주입**(What-if): `injections` 중 `on == d` 인 건을 5 와 같은 방식으로 적용(카드면 `unbilled`).
-8. **일말 기록**: `balances[p, k] = liquidity`. `liquidity < 0` 이면 `any_shortfall[p]=True`, `first_shortfall_idx` 갱신.
+7. **가상 지출 주입**(What-if): `injections` 중 `on == d` 인 건을 5 와 같은 방식으로 적용(카드면 `unbilled`). 현금 주입이 거절되면 실제 잔액·봉투 누적 없이 `suppressed_demand` 에만 누적한다.
+8. **일말 기록**: `balances[p, k] = liquidity`, `economic_balances[p, k] = liquidity − card_liability − unpaid_cash_obligation − suppressed_demand`. 실제 `liquidity < 0` 이면 `any_shortfall[p]=True`, `first_shortfall_idx` 갱신.
 
 벡터화: 모든 경로를 numpy 배열로 동시에 진행한다(`liquidity: (n_paths,)`). 포아송 건수는 `rng.poisson(λ, n_paths)`, 금액은 총 건수만큼 한 번에 뽑아 `np.add.reduceat` 로 경로별 합산. 성능 기준 §11.8.
 
@@ -347,8 +347,8 @@ stub 파일의 함수 시그니처는 **계약**이다. 바꿔야 하면 이 문
 | 기능 | 정의 |
 | --- | --- |
 | **SIM-01** `forecast` | `simulate(...).stats()`. UI 는 median 선 + P10~P90 밴드. "최저 잔액점 브리핑" = `min_balance`, `min_balance_date` |
-| **SIM-02** `what_if` | `base = simulate(seed=s)`, `branch = simulate(seed=s, injections=…)`. **같은 시드**. `delta_min_balance = branch.min − base.min`, `delta_shortfall_prob`, `delta_end_balance = median 마지막 차`. `verdict`: 분기 `card_shortfall_prob ≥ 0.5` 또는 `min_balance < 0` → DANGER; `delta_shortfall_prob ≥ 0.15` 또는 분기 min < 기본 min 의 50% → CAUTION; 그 외 OK |
-| **SIM-03** `risk` | `risk_score = round(100 × max(card_shortfall_prob, 0.6 × shortfall_prob))`. level: `< 20` SAFE, `< 50` WARNING, 그 외 DANGER. `worst_day = first_shortfall_date_median`. `expected_shortfall` = 부족 경로들의 최저 잔액 절대값 평균 |
+| **SIM-02** `what_if` | `base = simulate(seed=s)`, `branch = simulate(seed=s, injections=…)` 의 `stats(economic=True)` 를 비교한다. **같은 시드**. `delta_min_balance = branch.min − base.min`, `delta_shortfall_prob`, `delta_end_balance = median 마지막 차`. 현금 수요 거절(`suppressed_demand`)과 계좌 고정비 거절(`unpaid_cash_obligation`)도 경제 잔액에 남기므로, 주입 금액이 0 이상이면 CRN 기준 분기 `min_balance ≤ 기본 min_balance`, `shortfall_prob`·`card_shortfall_prob` 는 비감소여야 한다. `verdict`: 분기 `card_shortfall_prob ≥ 0.5` 또는 `min_balance < 0` → DANGER; `delta_shortfall_prob ≥ 0.15` 또는 분기 min < 기본 min 의 50% → CAUTION; 그 외 OK |
+| **SIM-03** `risk` | 경제 잔액 통계(`stats(economic=True)`)를 사용한다. `risk_score = round(100 × max(card_shortfall_prob, 0.6 × shortfall_prob))`. level: `< 20` SAFE, `< 50` WARNING, 그 외 DANGER. `worst_day = first_shortfall_date_median`. `expected_shortfall` = 경제 잔액 부족 경로들의 최저 잔액 절대값 평균 |
 
 `n_paths` 기본 1000. 시드 기본 42. 두 값은 툴 파라미터로 노출하지 않는다(재현성).
 
@@ -629,6 +629,8 @@ LLM 에 노출하는 함수. 모두 `TwinContext` 의 결정론 함수를 감싼
 - 전이 순서 검증: 수작업 3일 시나리오(수입일, 고정비, 월요일 청구, 출금 요일)에서 기대 잔액 정확 일치.
 - 카드 출금 부족 → `card_shortfall=True`, 잔액 되돌림, 다음 날 재시도.
 - What-if: 주입 금액 ≥ 0 이면 분기 `min_balance ≤ 기본 min_balance` (CRN 이면 항상 성립). 주입 0원 → 델타 전부 0.
+- 거절된 공통 현금 소비는 `suppressed_demand`, 거절된 계좌 고정비는 `unpaid_cash_obligation` 으로 경제 잔액에 반영하며, 실제 `balances` 는 generator와 같이 거절 시 보존한다.
+- 현금·카드 What-if를 기준일/1일 후/60일 후에 주입해 분기 최저 잔액과 위험 확률이 악화 또는 동일한지 확인한다. 계좌 고정비 성공 시 경제 의무를 만들지 않아 중복 차감이 없다.
 - 리스크 단조성: 주입 금액 증가 → `card_shortfall_prob` 비감소.
 - 성능: 1000경로×30일 < 2초.
 
