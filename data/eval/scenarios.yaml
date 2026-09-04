@@ -31,3 +31,6 @@ scenarios:
   - {id: C-alerts, profile_id: C_impulsive, intent: spending_alerts, utterance: "최근 소비 알림을 보여줘", args: {days: 1}}
   - {id: C-room, profile_id: C_impulsive, intent: room_status, utterance: "오늘 방 상태와 고양이 기분은?"}
   - {id: C-policy, profile_id: C_impulsive, intent: policy_tips, utterance: "내게 맞는 정책 혜택 추천이 있어?"}
+  - {id: C-danger-what-if, profile_id: C_impulsive, intent: what_if, utterance: "내일 쇼핑으로 50만원 써도 괜찮을까?", args: {amount: 500000, envelope: "쇼핑", days_from_now: 1, via_card: true}}
+  - {id: C-danger-risk, profile_id: C_impulsive, intent: payment_risk, utterance: "앞으로 30일 카드 결제 부족 위험을 확인해줘", args: {horizon_days: 30}}
+  - {id: C-goal-date, profile_id: C_impulsive, intent: goal_plan, utterance: "2026년 10월 15일까지 30만원 모으고 싶어", args: {target_amount: 300000, target_date: "2026-10-15"}}

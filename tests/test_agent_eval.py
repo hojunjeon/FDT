@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fdt.agent.coach import coach
 from fdt.agent.tools import normalize_date
+from fdt.eval import faithfulness as faithfulness_eval
 from fdt.eval.faithfulness import _field, _items, _params_match, _rule_route
 
 
@@ -50,3 +51,33 @@ def test_coach_exposes_first_pass_and_attempt_state():
     assert result["first_faithful"] is False
     assert result["attempt"] == 2
     assert result["attempt_status"] == "retry"
+
+
+def test_faithfulness_report_counts_verdict_and_date_violations(monkeypatch):
+    monkeypatch.setattr(
+        faithfulness_eval,
+        "_items",
+        lambda _path, _key: [{"id": "case-1", "profile_id": "C_impulsive", "utterance": "상태"}],
+    )
+    monkeypatch.setattr(faithfulness_eval, "_profile_dirs", lambda _root: [Path("C_impulsive")])
+    monkeypatch.setattr(
+        faithfulness_eval,
+        "_agent",
+        lambda _directory, _persona: type(
+            "FakeAgent",
+            (),
+            {"ask": lambda _self, _text: {
+                "faithful": True,
+                "fallback": False,
+                "first_faithful": True,
+                "attempt": 1,
+                "violations": ["date_mismatch"],
+                "verdict_conflict": {"engine": "DANGER", "reply_tone": "positive", "reason": "test"},
+            }},
+        )(),
+    )
+    report = faithfulness_eval.run_faithfulness(Path("unused"), Path("unused.yaml"))
+    assert report["verdict_conflict_count"] == 3
+    assert report["date_mismatch_count"] == 3
+    assert report["criteria"]["verdict_conflict_max"] == 0
+    assert report["passed"] is False

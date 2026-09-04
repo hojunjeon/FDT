@@ -4,7 +4,9 @@ import pytest
 
 from fdt.agent.coach import (
     PERSONAS,
+    _engine_dates,
     allowed_numbers,
+    check_date_faithful,
     check_faithful,
     coach,
     extract_numbers,
@@ -44,6 +46,49 @@ def test_check_faithful_uses_amount_tolerance_and_reports_violations():
     assert check_faithful("오늘은 21만원 안에서 쓰고 부족 확률은 35%야.", engine) == (True, [])
     faithful, violations = check_faithful("오늘은 99만원 안에서 써.", engine)
     assert not faithful and violations == [990_000]
+
+
+def test_check_faithful_rejects_positive_tone_for_danger_and_accepts_warning():
+    engine = {"verdict": "DANGER"}
+    faithful, violations = check_faithful("괜찮아요, 안정적이에요.", engine)
+    assert not faithful and "verdict_conflict" in violations
+    assert check_faithful("위험 신호가 있어요.", engine) == (True, [])
+    assert check_faithful("괜찮지만 주의가 필요합니다.", engine) == (True, [])
+    faithful, violations = check_faithful("괜찮아요, 문제 없어요.", engine)
+    assert not faithful and "verdict_conflict" in violations
+
+
+def test_check_faithful_rejects_hallucinated_date_but_accepts_engine_date():
+    engine = {"target_date": "2026-09-15"}
+    faithful, violations = check_faithful("2023년 11월 15일까지 살펴볼게요.", engine)
+    assert not faithful and "date_mismatch" in violations
+    assert check_faithful("2026-09-15까지 살펴볼게요.", engine) == (True, [])
+
+
+def test_check_faithful_collects_dates_from_nested_lists_and_key_agnostic_strings():
+    assert check_faithful(
+        "2026-09-09에 시작해요.",
+        {"weekly_caps": [{"week_start": "2026-09-09"}]},
+    ) == (True, [])
+    assert check_faithful(
+        "10월 2일 잔액을 볼게요.",
+        {"dates": ["2026-09-02", "2026-10-02"]},
+    ) == (True, [])
+    assert check_faithful("2026-09-03을 볼게요.", {"note": "2026-09-03"}) == (True, [])
+    faithful, violations = check_faithful(
+        "2023년 11월 15일 잔액을 볼게요.",
+        {"dates": ["2026-09-02", "2026-10-02"]},
+    )
+    assert not faithful and "date_mismatch" in violations
+
+
+def test_engine_date_collection_requires_strict_iso_strings():
+    assert check_date_faithful("2026-09-02 확인", {"build": "2026.09.02"}) == (
+        False,
+        ["2026-09-02"],
+    )
+    assert check_date_faithful("2026-09-02 확인", {"target_date": "2026-09-02"}) == (True, [])
+    assert _engine_dates({"build": "20260902", "count": "100000", "price": "1,234.50"}) == set()
 
 
 def test_template_fallback_is_faithful_for_all_intents_and_personas():
@@ -95,6 +140,14 @@ def test_coach_retries_once_then_accepts_faithful_response():
     assert result["faithful"] is True and result["fallback"] is False
     assert result["reply"] == "1만 9천원 안에서 써요."
     assert client.calls == 2
+
+
+def test_coach_retries_on_verdict_conflict():
+    client = _FakeClient(["괜찮아요.", "위험 신호가 있어요."])
+    result = coach(client, "온순냥", "what_if", {"verdict": "DANGER"}, "사도 돼?")
+    assert result["faithful"] is True and result["fallback"] is False
+    assert result["first_faithful"] is False and result["attempt"] == 2
+    assert result["verdict_conflict"] is None
 
 
 def test_coach_falls_back_when_llm_is_unavailable():

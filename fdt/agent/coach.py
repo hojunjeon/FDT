@@ -30,9 +30,81 @@ SYSTEM_PROMPT = """너는 KeyFin의 고양이 코치다. 아래 [엔진 결과]�
 가장 중요한 최종 점검: 답변의 모든 숫자를 [허용 숫자 집합]과 대조하고, 하나라도 없으면 그 숫자를 삭제한다. 숫자를 쓰지 않아도 된다."""
 
 _DATE_RE = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
+_KOREAN_DATE_RE = re.compile(
+    r"(?<!\d)(?:(?P<year>\d{4})\s*년\s*)?(?P<month>\d{1,2})\s*월\s*(?P<day>\d{1,2})\s*일(?!\d)"
+)
+_NUMERIC_DATE_RE = re.compile(
+    r"(?<!\d)(?P<year>\d{4})[-./](?P<month>\d{1,2})[-./](?P<day>\d{1,2})(?!\d)"
+)
+_ENGINE_DATE_RE = re.compile(
+    r"(?<![0-9])(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})(?![0-9])"
+)
 _NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_.])-?\d[\d,]*(?:\.\d+)?")
 _UNIT_RE = re.compile(r"\s*(억|만|천|백)")
 _AMOUNT_FACTORS = {"억": 100_000_000, "만": 10_000, "천": 1_000, "백": 100}
+_ATTENTION_LEVELS = frozenset({"DANGER", "WARNING"})
+_SAFE_LEVELS = frozenset({"SAFE", "OK"})
+
+# 판정 충돌은 숫자 검사와 분리해 고정된 어휘 사전으로 검사한다.
+POSITIVE_TONE_WORDS = (
+    "괜찮",
+    "안정적",
+    "문제 없",
+    "여유",
+    "큰 영향은 덜",
+    "영향은 적",
+    "안심",
+    "무리 없",
+    "충분",
+    "편하게 써",
+)
+NEGATIVE_TONE_WORDS = (
+    "위험",
+    "부족",
+    "주의",
+    "조심",
+    "경고",
+    "문제",
+    "마이너스",
+    "모자라",
+    "줄여",
+    "줄이는 게",
+    "피해야",
+    "불안",
+    "안 돼",
+    "않",
+    "아니",
+    "여유가 없",
+)
+CAUTION_TONE_WORDS = ("주의", "조심", "신중")
+STRONG_WARNING_WORDS = (
+    "위험해",
+    "위험하다",
+    "위험합니다",
+    "위험할",
+    "위험입니다",
+    "위험 신호",
+    "부족해",
+    "부족하다",
+    "부족합니다",
+    "부족할",
+    "주의해야",
+    "주의하세요",
+    "조심해야",
+    "조심하세요",
+    "줄여야",
+    "줄이는 게 좋아",
+    "문제가 있어",
+    "문제가 있습니다",
+    "마이너스",
+    "안 돼",
+)
+_DATE_FIELDS = frozenset({
+    "date", "dates", "target_date", "due", "as_of", "next_income_date", "worst_day",
+    "min_balance_date", "first_shortfall_date_median", "cycle_start", "cycle_end",
+    "week_start", "week_end",
+})
+_MAX_ENGINE_DATE_DEPTH = 8
 
 
 def _number(value: str) -> int | float:
@@ -137,8 +209,21 @@ def extract_numbers(text: str) -> list[int | float]:
     return [value for value, _ in _extract_tokens(text)]
 
 
-def check_faithful(text: str, engine_json: dict[str, Any]) -> tuple[bool, list[int | float]]:
-    """텍스트의 모든 숫자가 허용 집합에 있으면 True. 위반 숫자 목록 반환."""
+def check_faithful(text: str, engine_json: dict[str, Any]) -> tuple[bool, list[int | float | str]]:
+    """숫자·판정·날짜가 엔진 결과와 충실하면 True. 위반 목록을 반환한다."""
+    numeric_violations = _numeric_violations(text, engine_json)
+    _, conflict = check_verdict_consistency(text, engine_json)
+    _, date_violations = check_date_faithful(text, engine_json)
+    violations: list[int | float | str] = list(numeric_violations)
+    if conflict is not None:
+        violations.append("verdict_conflict")
+    if date_violations:
+        violations.append("date_mismatch")
+    return not violations, violations
+
+
+def _numeric_violations(text: str, engine_json: dict[str, Any]) -> list[int | float]:
+    """숫자 충실도만 검사한다."""
     allowed = allowed_numbers(engine_json)
     violations: list[int | float] = []
     for value, unit in _extract_tokens(text):
@@ -146,7 +231,178 @@ def check_faithful(text: str, engine_json: dict[str, Any]) -> tuple[bool, list[i
             continue
         if value not in violations:
             violations.append(value)
-    return not violations, violations
+    return violations
+
+
+def check_verdict_consistency(text: str, engine_json: dict[str, Any]) -> tuple[bool, dict[str, str] | None]:
+    """엔진 판정과 코칭 문장의 긍정·부정 톤이 일치하는지 검사한다."""
+    conflict = _find_verdict_conflict(text, engine_json)
+    return conflict is None, conflict
+
+
+def _find_verdict_conflict(text: str, engine_json: dict[str, Any]) -> dict[str, str] | None:
+    levels = _engine_levels(engine_json)
+    positive = _contains_positive_tone(text)
+    negative = _contains_strong_warning(text)
+    caution = _contains_tone(text, CAUTION_TONE_WORDS)
+    for level in levels:
+        if level in _ATTENTION_LEVELS and positive and not negative and not caution:
+            return {
+                "engine": level,
+                "reply_tone": "positive",
+                "reason": f"엔진 판정 {level}인데 긍정 톤만 사용됨",
+            }
+    if any(level in _ATTENTION_LEVELS for level in levels):
+        return None
+    for level in levels:
+        if level in _SAFE_LEVELS and negative and not positive:
+            return {
+                "engine": level,
+                "reply_tone": "negative",
+                "reason": f"엔진 판정 {level}인데 강한 경고 톤만 사용됨",
+            }
+    return None
+
+
+def _engine_levels(value: Any) -> list[str]:
+    levels: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key in {"verdict", "level", "health_level"} and isinstance(child, str):
+                    levels.append(child.strip().upper())
+                visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return levels
+
+
+def _contains_tone(text: str, words: tuple[str, ...]) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    return any(word in text or word.replace(" ", "") in compact for word in words)
+
+
+def _contains_positive_tone(text: str) -> bool:
+    if not _contains_tone(text, POSITIVE_TONE_WORDS):
+        return False
+    if re.search(
+        r"(?:괜찮|안정적|여유|충분|안심|무리\s*없|편하게\s*써)"
+        r"(?:이지|이|가|은|는|지|을|를)?\s*(?:없|않|아니)",
+        text,
+    ):
+        return False
+    if re.search(r"문제\s*없.*(?:않|아니)", text):
+        return False
+    return True
+
+
+def _contains_strong_warning(text: str) -> bool:
+    if _contains_tone(text, STRONG_WARNING_WORDS):
+        return True
+    if re.search(
+        r"(?:위험|부족)\s*(?:가능성|확률|점수|금액|액)"
+        r"\s*(?:이|가|은|는)?\s*(?:높|크|많|심각|커)",
+        text,
+    ):
+        return True
+    if re.search(
+        r"(?:괜찮|안정적|여유|충분|안심|무리\s*없|편하게\s*써)"
+        r"(?:이지|이|가|은|는|지|을|를)?\s*(?:없|않|아니)",
+        text,
+    ) or re.search(r"문제\s*없.*(?:않|아니)", text):
+        return True
+    if "위험" in text and not re.search(
+        r"위험\s*(가능성|확률|점수|도|이\s*낮|이\s*크지|하지|하진|하지는)", text
+    ):
+        return True
+    if "부족" in text and not re.search(
+        r"부족\s*(가능성|확률|금액|액|하지|하진|하지는)", text
+    ):
+        return True
+    return False
+
+
+def check_date_faithful(text: str, engine_json: dict[str, Any]) -> tuple[bool, list[str]]:
+    """답변의 날짜가 엔진 결과의 날짜 필드와 일치하는지 검사한다."""
+    mismatches = _date_mismatches(text, engine_json)
+    return not mismatches, mismatches
+
+
+def _date_mismatches(text: str, engine_json: dict[str, Any]) -> list[str]:
+    engine_dates = _engine_dates(engine_json)
+    mismatches: list[str] = []
+    for raw, year, month, day in _reply_dates(text):
+        if any(
+            engine_month == month
+            and engine_day == day
+            and (year is None or engine_year == year)
+            for engine_year, engine_month, engine_day in engine_dates
+        ):
+            continue
+        if raw not in mismatches:
+            mismatches.append(raw)
+    return mismatches
+
+
+def _reply_dates(text: str) -> list[tuple[str, int | None, int, int]]:
+    found: list[tuple[str, int | None, int, int]] = []
+    spans: list[tuple[int, int]] = []
+    for match in _NUMERIC_DATE_RE.finditer(text):
+        try:
+            year, month, day = (int(match.group(name)) for name in ("year", "month", "day"))
+            date(year, month, day)
+        except ValueError:
+            continue
+        found.append((match.group(), year, month, day))
+        spans.append(match.span())
+    for match in _KOREAN_DATE_RE.finditer(text):
+        if any(start <= match.start() < end for start, end in spans):
+            continue
+        try:
+            year = int(match.group("year")) if match.group("year") else None
+            month, day = int(match.group("month")), int(match.group("day"))
+            date(year or 2000, month, day)
+        except ValueError:
+            continue
+        found.append((match.group(), year, month, day))
+    return found
+
+
+def _engine_dates(value: Any) -> set[tuple[int | None, int, int]]:
+    dates: set[tuple[int | None, int, int]] = set()
+
+    def add(item: Any) -> None:
+        if isinstance(item, date):
+            dates.add((item.year, item.month, item.day))
+            return
+        if not isinstance(item, str):
+            return
+        for match in _ENGINE_DATE_RE.finditer(item):
+            try:
+                year, month, day = (int(match.group(name)) for name in ("year", "month", "day"))
+                date(year, month, day)
+            except ValueError:
+                continue
+            dates.add((year, month, day))
+
+    def visit(item: Any, depth: int = 0) -> None:
+        if depth > _MAX_ENGINE_DATE_DEPTH:
+            return
+        if isinstance(item, (date, str)):
+            add(item)
+        elif isinstance(item, dict):
+            for child in item.values():
+                visit(child, depth + 1)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child, depth + 1)
+
+    visit(value)
+    return dates
 
 
 def _is_allowed(value: int | float, allowed: set[int | float], unit: str) -> bool:
@@ -169,6 +425,7 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
     if client is None:
         return {
             "reply": fallback, "faithful": True, "fallback": True, "violations": [],
+            "verdict_conflict": None,
             "first_faithful": False, "attempt": 0, "attempt_status": "fallback",
         }
     available = getattr(client, "available", None)
@@ -182,6 +439,7 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
     if not ready:
         return {
             "reply": fallback, "faithful": True, "fallback": True, "violations": [],
+            "verdict_conflict": None,
             "first_faithful": False, "attempt": 0, "attempt_status": "fallback",
         }
 
@@ -197,7 +455,8 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
             user_text=user_text,
         ),
     }]
-    violations: list[int | float] = []
+    violations: list[int | float | str] = []
+    observed_conflict: dict[str, str] | None = None
     first_faithful = False
     attempts = 0
     for attempt in range(2):
@@ -214,6 +473,9 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
         except Exception:
             content = ""
         faithful, violations = check_faithful(content, engine_json)
+        _, conflict = check_verdict_consistency(content, engine_json)
+        if conflict is not None:
+            observed_conflict = conflict
         if attempt == 0:
             first_faithful = bool(content and faithful)
         if content and faithful:
@@ -222,6 +484,7 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
                 "faithful": True,
                 "fallback": False,
                 "violations": [],
+                "verdict_conflict": None,
                 "first_faithful": first_faithful,
                 "attempt": attempts,
                 "attempt_status": "first" if attempts == 1 else "retry",
@@ -231,6 +494,7 @@ def coach(client: OllamaClient, persona: str, intent: str, engine_json: dict[str
         "faithful": True,
         "fallback": True,
         "violations": [],
+        "verdict_conflict": observed_conflict,
         "first_faithful": first_faithful,
         "attempt": attempts,
         "attempt_status": "fallback",

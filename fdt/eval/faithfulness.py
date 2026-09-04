@@ -145,7 +145,8 @@ def run_faithfulness(seed_root: Path, scenarios_path: Path) -> dict[str, Any]:
         for persona in PERSONAS:
             item = {"scenario": scenario_id, "profile": profile_id, "persona": persona,
                     "faithful": False, "fallback": False, "first_faithful": False,
-                    "first_pass": False, "attempt": 0, "retry_pass": False}
+                    "first_pass": False, "attempt": 0, "retry_pass": False,
+                    "violations": [], "verdict_conflict": None}
             try:
                 directory = profile_dirs[profile_id]
                 key = (profile_id, persona)
@@ -157,6 +158,9 @@ def run_faithfulness(seed_root: Path, scenarios_path: Path) -> dict[str, Any]:
                 first_pass = _first_pass(response, faithful, fallback)
                 attempt = _attempt(response, first_pass, fallback)
                 retry_pass = bool(attempt >= 2 and not first_pass and faithful and not fallback)
+                violations = _response_value(response, "violations", []) or []
+                if not isinstance(violations, list):
+                    violations = [violations]
                 item.update(
                     faithful=faithful,
                     fallback=fallback,
@@ -164,9 +168,9 @@ def run_faithfulness(seed_root: Path, scenarios_path: Path) -> dict[str, Any]:
                     first_pass=first_pass,
                     attempt=attempt,
                     retry_pass=retry_pass,
+                    violations=violations,
+                    verdict_conflict=_response_value(response, "verdict_conflict"),
                 )
-                if not faithful:
-                    item["violations"] = _response_value(response, "violations", []) or []
             except Exception as exc:  # evaluation report keeps the remaining cases observable
                 item["error"] = f"{type(exc).__name__}: {exc}"
             results.append(item)
@@ -177,21 +181,51 @@ def run_faithfulness(seed_root: Path, scenarios_path: Path) -> dict[str, Any]:
     fallback_count = sum(bool(item["fallback"]) for item in results)
     retry_count = sum(bool(item["attempt"] >= 2 and not item["first_pass"]) for item in results)
     retry_pass_count = sum(bool(item["retry_pass"]) for item in results)
+    verdict_conflict_count = sum(
+        bool(item.get("verdict_conflict")) or _has_violation(item.get("violations", []), "verdict_conflict")
+        for item in results
+    )
+    date_mismatch_count = sum(
+        _has_violation(item.get("violations", []), "date_mismatch") for item in results
+    )
     unfaithful = total - final_count
     first_rate = first_count / total if total else 0.0
     final_rate = final_count / total if total else 0.0
     fallback_rate = fallback_count / total if total else 0.0
     retry_pass_rate = retry_pass_count / retry_count if retry_count else 0.0
-    passed = bool(total and first_rate >= 0.80 and fallback_rate <= 0.20 and unfaithful == 0)
+    criteria = {
+        "first_pass_min": 0.80,
+        "fallback_max": 0.20,
+        "unfaithful_max": 0,
+        "verdict_conflict_max": 0,
+    }
+    passed = bool(
+        total
+        and first_rate >= criteria["first_pass_min"]
+        and fallback_rate <= criteria["fallback_max"]
+        and unfaithful <= criteria["unfaithful_max"]
+        and verdict_conflict_count <= criteria["verdict_conflict_max"]
+    )
     return {"scenarios": len(scenarios), "personas": len(PERSONAS), "total": total,
             "first_pass_rate": first_rate, "retry_pass_rate": retry_pass_rate,
             "final_pass_rate": final_rate, "fallback_rate": fallback_rate,
             "fallback_count": fallback_count, "retry_count": retry_count,
             "retry_pass_count": retry_pass_count,
-            "unfaithful_count": unfaithful, "criteria": {"first_pass_min": 0.80, "fallback_max": 0.20,
-                                                            "unfaithful_max": 0},
+            "unfaithful_count": unfaithful,
+            "verdict_conflict_count": verdict_conflict_count,
+            "date_mismatch_count": date_mismatch_count,
+            "criteria": criteria,
             "passed": passed, "status": "complete" if total and not any("error" in item for item in results) else "blocked",
             "results": results}
+
+
+def _has_violation(violations: Any, code: str) -> bool:
+    if not isinstance(violations, list):
+        return violations == code
+    return any(
+        item == code or (isinstance(item, dict) and item.get("type") == code)
+        for item in violations
+    )
 
 
 def _profile_dirs(seed_root: Path) -> list[Path]:
