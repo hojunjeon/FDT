@@ -507,36 +507,69 @@ def api_health(response: Response) -> dict[str, Any]:
     }
 
 
+def _sorted_log_files(directory: Path) -> list[Path]:
+    """로그 루트 아래 모든 JSONL 파일을 mtime 내림차순으로 반환한다.
+
+    `<로그루트>/<YYYY-MM-DD>/<surface>-<session_id>.jsonl` 구조(새 계층)와
+    기존 평면 파일(`<로그루트>/<YYYY-MM-DD>.jsonl`) 을 rglob 으로 함께 찾는다.
+    파일명은 더 이상 시간순 정렬 키가 아니므로(§SESSIONLOG 파급 효과 1) mtime 을 쓴다.
+    """
+    try:
+        paths = [path for path in directory.rglob("*.jsonl") if path.is_file()]
+    except OSError:
+        return []
+
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return -1.0
+
+    return sorted(paths, key=_mtime, reverse=True)
+
+
+def _read_turn_records(paths: list[Path], limit: int, session_id: str | None) -> list[dict[str, Any]]:
+    """주어진 파일들을(최신순으로 가정) 역방향으로 읽어 limit 만큼 레코드를 모은다."""
+    records: list[dict[str, Any]] = []
+    for path in paths:
+        try:
+            for line in _iter_lines_reverse(path):
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and (session_id is None or value.get("session_id") == session_id):
+                    records.append(value)
+                    if len(records) >= limit:
+                        return records
+        except OSError:
+            continue
+    return records
+
+
 @app.get("/api/logs/turns")
 def get_turn_logs(
     limit: int = Query(default=50, ge=1, le=500),
     session_id: str | None = Query(default=None, min_length=1, max_length=80),
 ) -> dict[str, Any]:
     """최근 턴 로그를 읽기 전용으로 반환한다. §9.2.2"""
-    records: list[dict[str, Any]] = []
     directory = _TURN_LOGGER.log_dir
-    try:
-        paths = sorted(directory.glob("*.jsonl"), reverse=True) if directory.is_dir() else []
-        for path in paths:
-            try:
-                for line in _iter_lines_reverse(path):
-                    if not line.strip():
-                        continue
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(value, dict) and (session_id is None or value.get("session_id") == session_id):
-                        records.append(value)
-                        if len(records) >= limit:
-                            break
-            except OSError:
-                continue
-            if len(records) >= limit:
-                break
-    except OSError:
-        records = []
-    return {"turns": records}
+    if not directory.is_dir():
+        return {"turns": []}
+
+    all_paths = _sorted_log_files(directory)
+
+    if session_id:
+        # 새 계층 구조는 세션의 모든 턴을 그 session_id 가 든 파일(들)에만 담으므로,
+        # 파일명이 일치하는 파일만 읽으면 그것으로 충분하다(전수 검색 불필요).
+        matched_paths = [path for path in all_paths if session_id in path.name]
+        if matched_paths:
+            return {"turns": _read_turn_records(matched_paths, limit, session_id)[:limit]}
+        # 파일명에서 못 찾으면(예: 구 평면 파일) 기존처럼 전수 검색으로 폴백한다.
+
+    return {"turns": _read_turn_records(all_paths, limit, session_id)[:limit]}
 
 
 def _iter_lines_reverse(path: Path) -> Iterator[str]:

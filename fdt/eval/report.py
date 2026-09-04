@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -104,6 +105,93 @@ def _error_type(value: Any) -> str | None:
 
 def _model_key(value: Any) -> str:
     return "null" if value is None else _label(value)
+
+
+def _parse_ts(value: Any) -> datetime | None:
+    """레코드의 ts 를 정렬 가능한 datetime 으로 파싱한다. 실패하면 None."""
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_metrics(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """세션별(session_id) 운영 지표를 집계해 last_ts 내림차순으로 반환한다."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        grouped.setdefault(_label(record.get("session_id")), []).append(record)
+
+    sessions: list[dict[str, Any]] = []
+    for session_id, group in grouped.items():
+        turns = len(group)
+        first = group[0]
+
+        fallback_count = sum(1 for r in group if bool(r.get("fallback")))
+        first_faithful_count = sum(1 for r in group if bool(r.get("first_faithful")))
+        violations_count = 0
+        verdict_conflict_count = 0
+        for r in group:
+            violation_names = _violation_types(r.get("violations"))
+            violations_count += len(violation_names)
+            if r.get("verdict_conflict") not in (None, False, "") or "verdict_conflict" in violation_names:
+                verdict_conflict_count += 1
+
+        llm_calls = sum(_nonnegative_int(r.get("llm_calls")) for r in group)
+        tokens_total = 0.0
+        for r in group:
+            tokens = r.get("tokens")
+            if isinstance(tokens, dict):
+                tokens_total += _number(tokens.get("prompt")) or 0.0
+                tokens_total += _number(tokens.get("completion")) or 0.0
+
+        total_latencies: list[float] = []
+        for r in group:
+            latency = r.get("latency_ms")
+            if isinstance(latency, dict):
+                value = _number(latency.get("total"))
+                if value is not None:
+                    total_latencies.append(value)
+
+        # ts 를 파싱해 first/last 를 정한다. 파싱 실패한 값은 정렬에서
+        # 뒤로 밀리도록 취급하되, 원본 문자열은 그대로 보존한다.
+        ts_pairs = [(_label(r.get("ts"), ""), _parse_ts(r.get("ts"))) for r in group]
+
+        def _ts_sort_key(pair: tuple[str, datetime | None]) -> tuple[int, datetime | str]:
+            raw, parsed = pair
+            return (1, parsed) if parsed is not None else (0, raw)
+
+        ordered = sorted(ts_pairs, key=_ts_sort_key)
+        first_ts = ordered[0][0] if ordered else ""
+        last_ts = ordered[-1][0] if ordered else ""
+
+        sessions.append(
+            {
+                "session_id": session_id,
+                "surface": _label(first.get("surface")),
+                "profile_id": _label(first.get("profile_id")),
+                "persona": _label(first.get("persona")),
+                "turns": turns,
+                "first_ts": first_ts,
+                "last_ts": last_ts,
+                "fallback_rate": fallback_count / turns if turns else 0.0,
+                "first_faithful_rate": first_faithful_count / turns if turns else 0.0,
+                "verdict_conflict_count": verdict_conflict_count,
+                "violations_count": violations_count,
+                "llm_calls": llm_calls,
+                "tokens_total": tokens_total,
+                "latency_total_p50": _percentile(total_latencies, 50),
+                "latency_total_p95": _percentile(total_latencies, 95),
+            }
+        )
+
+    def _session_order_key(session: dict[str, Any]) -> tuple[int, datetime]:
+        parsed = _parse_ts(session.get("last_ts"))
+        return (1, parsed) if parsed is not None else (0, datetime.min)
+
+    sessions.sort(key=_session_order_key, reverse=True)
+    return sessions
 
 
 def _aggregate(records: list[dict[str, Any]], *, include_models: bool = True) -> dict[str, Any]:
@@ -258,14 +346,24 @@ def _records(log_dir: Path) -> tuple[list[dict[str, Any]], int]:
     return records, skipped
 
 
-def run_report(log_dir: Path, out: Path | None = None) -> dict[str, Any]:
-    """모든 JSONL 턴 로그를 집계하고 선택적으로 JSON 파일에 저장한다."""
+def run_report(log_dir: Path, out: Path | None = None, session_id: str | None = None) -> dict[str, Any]:
+    """모든 JSONL 턴 로그를 집계하고 선택적으로 JSON 파일에 저장한다.
+
+    `session_id` 를 주면 해당 세션의 레코드만 집계한다. 기본값 `None` 은
+    기존 동작(전체 집계)과 완전히 동일하다.
+    """
     root = Path(log_dir)
     missing = not root.exists()
     records, skipped = ([], 0) if missing else _records(root)
+    if session_id is not None:
+        target = _label(session_id)
+        records = [record for record in records if _label(record.get("session_id")) == target]
     report = _aggregate(records)
     report["skipped_lines"] = skipped
     report["log_dir_missing"] = missing
+    if "session_count" not in report:
+        report["session_count"] = report.get("sessions", 0)
+    report["session_summaries"] = _session_metrics(records)
     if out is not None:
         output = Path(out)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -302,6 +400,26 @@ def render_markdown(report: dict[str, Any]) -> str:
             ("건너뛴 줄", report.get("skipped_lines", 0)),
         )),
         "",
+        "## 최근 세션",
+        "",
+    ]
+    session_rows = report.get("session_summaries", []) or []
+    if session_rows:
+        lines.extend((
+            "| session_id | surface | 턴 수 | fallback 비율 | 1차 faithful 비율 | violations | 마지막 ts |",
+            "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ))
+        for session in session_rows[:10]:
+            lines.append(
+                f"| {session.get('session_id')} | {session.get('surface')} | "
+                f"{session.get('turns', 0)} | {float(session.get('fallback_rate', 0)):.2%} | "
+                f"{float(session.get('first_faithful_rate', 0)):.2%} | "
+                f"{session.get('violations_count', 0)} | {session.get('last_ts', '')} |"
+            )
+    else:
+        lines.append("기록 없음")
+    lines.extend([
+        "",
         "## Surface 분포",
         "",
         *_table(sorted((str(key), value) for key, value in (report.get("surfaces", {}) or {}).items())),
@@ -322,7 +440,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "| 구간 | p50 | p95 |",
         "| --- | ---: | ---: |",
-    ]
+    ])
     for field in _LATENCY_FIELDS:
         values = latency.get(field, {}) or {}
         lines.append(f"| {field} | {values.get('p50')} | {values.get('p95')} |")
