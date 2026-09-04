@@ -4,15 +4,18 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import time
 from collections.abc import Mapping
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import typer
 
 from fdt.schemas.domain import VirtualSpend
 from fdt.taxonomy.categories import Envelope
+from fdt.agent.telemetry import TurnLogger
 
 
 app = typer.Typer(help="KeyFin 개인 금융 디지털 트윈", no_args_is_help=True)
@@ -20,6 +23,7 @@ eval_app = typer.Typer(help="FDT 평가 실행", no_args_is_help=True)
 app.add_typer(eval_app, name="eval")
 SEED_DIR = Path("data/seed")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_TURN_LOGGER = TurnLogger()
 
 
 @app.callback()
@@ -165,7 +169,25 @@ def brief(
 ) -> None:
     """§9.1 FDT 에이전트 상태 브리핑을 출력한다."""
     ctx = _load_context(seed_dir, as_of)
-    _echo_json(_make_agent(ctx, persona).briefing())
+    agent = _make_agent(ctx, persona)
+    client = getattr(agent, "client", None)
+    _reset_usage(client)
+    started = time.perf_counter()
+    result = agent.briefing()
+    session_id = uuid4().hex
+    _log_cli_turn(
+        surface="cli_brief",
+        session_id=session_id,
+        turn=1,
+        profile_id=_snapshot_path(seed_dir).parent.name,
+        ctx=ctx,
+        agent=agent,
+        user_message="현재 금융 상태를 간단히 브리핑해줘",
+        result=result,
+        route=["get_state", "safe_to_spend", "spending_alerts", "payment_risk", "coach"],
+        started=started,
+    )
+    _echo_json(result)
 
 
 @app.command()
@@ -175,7 +197,10 @@ def chat(
     as_of: str | None = typer.Option(None, "--as-of", help="기준일 YYYY-MM-DD"),
 ) -> None:
     """§9.1 FDT 에이전트 대화 REPL을 실행한다."""
-    agent = _make_agent(_load_context(seed_dir, as_of), persona)
+    ctx = _load_context(seed_dir, as_of)
+    agent = _make_agent(ctx, persona)
+    session_id = uuid4().hex
+    turn = 0
     typer.echo("대화를 시작합니다. 종료하려면 '종료'를 입력하세요.")
     while True:
         try:
@@ -187,8 +212,29 @@ def chat(
             break
         if not text.strip():
             continue
+        turn += 1
+        client = getattr(agent, "client", None)
+        _reset_usage(client)
+        started = time.perf_counter()
         result = agent.ask(text)
         typer.echo(result["reply"])
+        tool_route = [
+            str(call.get("name", ""))
+            for call in result.get("tool_calls", [])
+            if isinstance(call, dict)
+        ]
+        _log_cli_turn(
+            surface="cli_chat",
+            session_id=session_id,
+            turn=turn,
+            profile_id=_snapshot_path(seed_dir).parent.name,
+            ctx=ctx,
+            agent=agent,
+            user_message=text,
+            result=result,
+            route=(tool_route or ["get_state"]) + ["coach"],
+            started=started,
+        )
 
 
 @eval_app.command("backtest")
@@ -227,6 +273,17 @@ def eval_routing(
 ) -> None:
     """§9.1 툴 라우팅 평가를 실행한다."""
     _run_eval("routing", seed_root, out, utterances=utterances)
+
+
+@eval_app.command("report")
+def eval_report(
+    log_dir: Path = typer.Option(Path("log/turns"), "--log-dir", help="턴 로그 디렉터리"),
+    out: Path | None = typer.Option(None, "--out", help="보고서 JSON 경로"),
+) -> None:
+    """§9.1 턴 로그 운영 지표 보고서를 생성한다."""
+    from fdt.eval.report import run_report
+
+    _echo_json(run_report(log_dir, out))
 
 
 @app.command()
@@ -280,6 +337,109 @@ def _make_agent(ctx: Any, persona: str) -> Any:
         model=os.getenv("FDT_LLM_MODEL", DEFAULT_MODEL),
     )
     return FdtAgent(client, ctx, persona=persona)
+
+
+def _reset_usage(client: Any) -> None:
+    reset = getattr(client, "reset_usage", None)
+    if callable(reset):
+        try:
+            reset()
+        except Exception:
+            pass
+
+
+def _usage(client: Any) -> dict[str, Any]:
+    snapshot = getattr(client, "usage_snapshot", None)
+    if not callable(snapshot):
+        return {"calls": 0, "latency_ms": 0.0, "tokens": {"prompt": 0, "completion": 0}, "llm_error": None}
+    try:
+        value = snapshot()
+    except Exception:
+        return {"calls": 0, "latency_ms": 0.0, "tokens": {"prompt": 0, "completion": 0}, "llm_error": None}
+    if not isinstance(value, dict):
+        return {"calls": 0, "latency_ms": 0.0, "tokens": {"prompt": 0, "completion": 0}, "llm_error": None}
+    latency = value.get("latency_ms", value.get("llm_latency_ms", 0.0))
+    if isinstance(latency, dict):
+        latency = latency.get("llm", latency.get("total", 0.0))
+    tokens = value.get("tokens") if isinstance(value.get("tokens"), dict) else {}
+    errors = value.get("errors")
+    error = value.get("llm_error")
+    if error is None and isinstance(errors, list) and errors:
+        error = errors[-1]
+    return {
+        "calls": int(value.get("calls", value.get("llm_calls", 0)) or 0),
+        "latency_ms": float(latency or 0.0),
+        "tokens": {"prompt": int(tokens.get("prompt", 0) or 0), "completion": int(tokens.get("completion", 0) or 0)},
+        "llm_error": error if isinstance(error, dict) else None,
+    }
+
+
+def _log_tool_calls(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    logged: list[dict[str, Any]] = []
+    for call in value:
+        if not isinstance(call, dict):
+            continue
+        result = _jsonable(call.get("result", {}))
+        summary = result if isinstance(result, dict) else {}
+        logged.append({
+            "name": str(call.get("name", "")),
+            "args": _jsonable(call.get("args", {})),
+            "result_summary": {
+                str(key): item
+                for key, item in summary.items()
+                if item is None or isinstance(item, (str, int, float, bool))
+            },
+        })
+    return logged
+
+
+def _log_cli_turn(
+    *,
+    surface: str,
+    session_id: str,
+    turn: int,
+    profile_id: str,
+    ctx: Any,
+    agent: Any,
+    user_message: str,
+    result: dict[str, Any],
+    route: list[str],
+    started: float,
+) -> None:
+    client = getattr(agent, "client", None)
+    usage = _usage(client)
+    total_ms = round((time.perf_counter() - started) * 1000, 3)
+    llm_ms = round(max(0.0, usage["latency_ms"]), 3)
+    try:
+        _TURN_LOGGER.log_turn({
+            "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            "schema_version": 1,
+            "surface": surface,
+            "session_id": session_id,
+            "turn": turn,
+            "profile_id": profile_id,
+            "persona": str(result.get("persona", getattr(agent, "persona", ""))),
+            "as_of": getattr(getattr(ctx, "state", None), "as_of", date.today()).isoformat(),
+            "llm_model": getattr(client, "model", None),
+            "user_message": user_message,
+            "reply": str(result.get("reply", "")),
+            "route": route,
+            "tool_calls": _log_tool_calls(result.get("tool_calls")),
+            "faithful": bool(result.get("faithful", True)),
+            "first_faithful": bool(result.get("first_faithful", True)),
+            "attempt": int(result.get("attempt", 0) or 0),
+            "fallback": bool(result.get("fallback", True)),
+            "violations": _jsonable(result.get("violations", [])),
+            "verdict_conflict": _jsonable(result.get("verdict_conflict")),
+            "latency_ms": {"total": total_ms, "engine": round(max(0.0, total_ms - llm_ms), 3), "llm": llm_ms},
+            "llm_calls": usage["calls"],
+            "tokens": usage["tokens"],
+            "llm_error": usage["llm_error"],
+        })
+    except Exception:
+        pass
 
 
 def _snapshot_path(seed_dir: Path) -> Path:

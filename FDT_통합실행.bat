@@ -86,6 +86,7 @@ set "FDT_PROBE_TIMEOUT=5"
 echo.
 echo [시작] FDT 서버: http://%FDT_HOST%:%FDT_PORT%
 echo [로그] 실시간 저장: "%FDT_LOG_FILE%"
+echo [로그] 턴 JSONL 저장 디렉터리: "%~dp0log\turns"
 start "FDT Dashboard" powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& $env:FDT_PYTHON -m fdt.cli serve --host $env:FDT_HOST --port $env:FDT_PORT 2>&1 | Tee-Object -FilePath $env:FDT_LOG_FILE -Append"
 
 for /l %%N in (1,1,30) do (

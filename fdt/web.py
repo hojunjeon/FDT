@@ -1,13 +1,15 @@
 """로컬 대시보드용 FastAPI 어댑터. 설계: docs/03_FDT_설계.md §9.2"""
 from __future__ import annotations
 
+import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from uuid import uuid4
 
 import yaml
@@ -19,6 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from fdt.agent.agent import FdtAgent
 from fdt.agent.llm import DEFAULT_MODEL, DEFAULT_URL, OllamaClient
+from fdt.agent.telemetry import TurnLogger
 from fdt.agent.tools import TwinContext
 from fdt.ledger.ingest import ingest, load_snapshot
 from fdt.schemas.domain import LedgerTx, RiskResult, RoomProjection, State
@@ -82,11 +85,14 @@ class _Session:
     agent: FdtAgent
     risk_result: RiskResult
     room: RoomProjection
+    turn: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 _SESSIONS: dict[str, _Session] = {}
 _SESSIONS_LOCK = threading.Lock()
+_TURN_LOGGER = TurnLogger()
+_LOG_READ_BLOCK_SIZE = 64 * 1024
 
 app = FastAPI(
     title="FDT Local Dashboard",
@@ -191,6 +197,113 @@ def _dump(value: Any) -> Any:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
     return jsonable_encoder(value)
+
+
+def _reset_usage(client: Any) -> None:
+    reset = getattr(client, "reset_usage", None)
+    if callable(reset):
+        try:
+            reset()
+        except Exception:
+            pass
+
+
+def _usage(client: Any) -> dict[str, Any]:
+    snapshot = getattr(client, "usage_snapshot", None)
+    if not callable(snapshot):
+        return {"calls": 0, "latency_ms": 0.0, "tokens": {"prompt": 0, "completion": 0}, "llm_error": None}
+    try:
+        value = snapshot()
+    except Exception:
+        return {"calls": 0, "latency_ms": 0.0, "tokens": {"prompt": 0, "completion": 0}, "llm_error": None}
+    if not isinstance(value, dict):
+        return {"calls": 0, "latency_ms": 0.0, "tokens": {"prompt": 0, "completion": 0}, "llm_error": None}
+    latency = value.get("latency_ms", value.get("llm_latency_ms", 0.0))
+    if isinstance(latency, dict):
+        latency = latency.get("llm", latency.get("total", 0.0))
+    tokens = value.get("tokens")
+    if not isinstance(tokens, dict):
+        tokens = {"prompt": 0, "completion": 0}
+    errors = value.get("errors")
+    error = value.get("llm_error")
+    if error is None and isinstance(errors, list) and errors:
+        error = errors[-1]
+    return {
+        "calls": int(value.get("calls", value.get("llm_calls", 0)) or 0),
+        "latency_ms": float(latency or 0.0),
+        "tokens": {"prompt": int(tokens.get("prompt", 0) or 0), "completion": int(tokens.get("completion", 0) or 0)},
+        "llm_error": error if isinstance(error, dict) else None,
+    }
+
+
+def _scalar_summary(value: Any) -> dict[str, Any]:
+    data = _dump(value)
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(key): item
+        for key, item in data.items()
+        if item is None or isinstance(item, (str, int, float, bool))
+    }
+
+
+def _log_tool_calls(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    logged: list[dict[str, Any]] = []
+    for call in value:
+        if not isinstance(call, dict):
+            continue
+        logged.append({
+            "name": str(call.get("name", "")),
+            "args": _dump(call.get("args", {})),
+            "result_summary": _scalar_summary(call.get("result", {})),
+        })
+    return logged
+
+
+def _log_web_turn(
+    *,
+    session: _Session,
+    turn: int,
+    user_message: str,
+    reply: str,
+    route: list[str],
+    result: dict[str, Any],
+    client: Any,
+    started: float,
+) -> None:
+    usage = _usage(client)
+    total_ms = round((time.perf_counter() - started) * 1000, 3)
+    llm_ms = round(max(0.0, usage["latency_ms"]), 3)
+    try:
+        _TURN_LOGGER.log_turn({
+            "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            "schema_version": 1,
+            "surface": "web",
+            "session_id": session.id,
+            "turn": turn,
+            "profile_id": session.profile_id,
+            "persona": session.coach_persona,
+            "as_of": session.ctx.state.as_of.isoformat(),
+            "llm_model": getattr(client, "model", None),
+            "user_message": user_message,
+            "reply": reply,
+            "route": route,
+            "tool_calls": _log_tool_calls(result.get("tool_calls")),
+            "faithful": bool(result.get("faithful", True)),
+            "first_faithful": bool(result.get("first_faithful", True)),
+            "attempt": int(result.get("attempt", 0) or 0),
+            "fallback": bool(result.get("fallback", True)),
+            "violations": _dump(result.get("violations", [])),
+            "verdict_conflict": _dump(result.get("verdict_conflict")),
+            "latency_ms": {"total": total_ms, "engine": round(max(0.0, total_ms - llm_ms), 3), "llm": llm_ms},
+            "llm_calls": usage["calls"],
+            "tokens": usage["tokens"],
+            "llm_error": usage["llm_error"],
+        })
+    except Exception:
+        pass
 
 
 def _client() -> OllamaClient:
@@ -388,9 +501,71 @@ def api_health(response: Response) -> dict[str, Any]:
         "llm_ready": llm_ready,
         "llm_model": client.model,
         "fallback": not llm_ready,
+        "turn_log_dir": str(_TURN_LOGGER.log_dir),
         "service": "fdt-local-dashboard",
         "version": app.version,
     }
+
+
+@app.get("/api/logs/turns")
+def get_turn_logs(
+    limit: int = Query(default=50, ge=1, le=500),
+    session_id: str | None = Query(default=None, min_length=1, max_length=80),
+) -> dict[str, Any]:
+    """최근 턴 로그를 읽기 전용으로 반환한다. §9.2.2"""
+    records: list[dict[str, Any]] = []
+    directory = _TURN_LOGGER.log_dir
+    try:
+        paths = sorted(directory.glob("*.jsonl"), reverse=True) if directory.is_dir() else []
+        for path in paths:
+            try:
+                for line in _iter_lines_reverse(path):
+                    if not line.strip():
+                        continue
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict) and (session_id is None or value.get("session_id") == session_id):
+                        records.append(value)
+                        if len(records) >= limit:
+                            break
+            except OSError:
+                continue
+            if len(records) >= limit:
+                break
+    except OSError:
+        records = []
+    return {"turns": records}
+
+
+def _iter_lines_reverse(path: Path) -> Iterator[str]:
+    """파일을 끝에서부터 읽어 완성된 UTF-8 줄을 최신순으로 반환한다."""
+    with path.open("rb") as stream:
+        stream.seek(0, 2)
+        position = stream.tell()
+        pending = b""
+        while position:
+            size = min(_LOG_READ_BLOCK_SIZE, position)
+            position -= size
+            stream.seek(position)
+            pending = stream.read(size) + pending
+            chunks = pending.split(b"\n")
+            pending = chunks[0]
+            for raw_line in reversed(chunks[1:]):
+                if raw_line.endswith(b"\r"):
+                    raw_line = raw_line[:-1]
+                try:
+                    yield raw_line.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+        if pending:
+            if pending.endswith(b"\r"):
+                pending = pending[:-1]
+            try:
+                yield pending.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
 
 
 @app.get("/api/profiles")
@@ -430,6 +605,7 @@ def get_profile(profile_id: str, as_of: date | None = Query(default=None)) -> di
 @app.post("/api/chat/start")
 def start_chat(request: ChatStartRequest) -> dict[str, Any]:
     """금융 프로필과 코치 페르소나를 분리한 메모리 세션을 만든다. §9.2.3"""
+    started = time.perf_counter()
     if request.profile_id not in _profile_ids():
         raise HTTPException(status_code=404, detail=f"프로필을 찾을 수 없습니다: {request.profile_id}")
     if request.coach_persona not in COACH_PERSONA_IDS:
@@ -437,11 +613,13 @@ def start_chat(request: ChatStartRequest) -> dict[str, Any]:
     try:
         ctx, risk_result, room = _build_context(request.profile_id, request.as_of)
         session_id = uuid4().hex
-        agent = FdtAgent(_client(), ctx, persona=request.coach_persona)
-        session = _Session(session_id, request.profile_id, request.coach_persona, ctx, agent, risk_result, room)
+        client = _client()
+        _reset_usage(client)
+        agent = FdtAgent(client, ctx, persona=request.coach_persona)
+        session = _Session(session_id, request.profile_id, request.coach_persona, ctx, agent, risk_result, room, turn=1)
         with _SESSIONS_LOCK:
             _SESSIONS[session_id] = session
-        return {
+        result = {
             "session_id": session_id,
             "active": True,
             "profile_id": request.profile_id,
@@ -455,6 +633,17 @@ def start_chat(request: ChatStartRequest) -> dict[str, Any]:
             "risk": _dump(risk_result),
             "room": _dump(room),
         }
+        _log_web_turn(
+            session=session,
+            turn=session.turn,
+            user_message="",
+            reply=result["message"],
+            route=result["route"],
+            result=result,
+            client=client,
+            started=started,
+        )
+        return result
     except HTTPException:
         raise
     except EngineLoadError as exc:
@@ -472,6 +661,9 @@ def chat_message(request: ChatMessageRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
 
     with session.lock:
+        started = time.perf_counter()
+        client = getattr(session.agent, "client", None)
+        _reset_usage(client)
         try:
             agent_result = session.agent.ask(request.message.strip())
         except Exception as exc:
@@ -479,7 +671,8 @@ def chat_message(request: ChatMessageRequest) -> dict[str, Any]:
         results = _chat_results(agent_result)
         route = [item["tool"] for item in results] or ["get_state"]
         route.append("coach")
-        return {
+        session.turn += 1
+        response = {
             "session_id": session.id,
             "active": True,
             "message": str(agent_result.get("reply", "")),
@@ -491,6 +684,17 @@ def chat_message(request: ChatMessageRequest) -> dict[str, Any]:
             "engine_json": _dump(agent_result.get("engine_json", {})),
             "tool_calls": _dump(agent_result.get("tool_calls", [])),
         }
+        _log_web_turn(
+            session=session,
+            turn=session.turn,
+            user_message=request.message.strip(),
+            reply=response["message"],
+            route=route,
+            result=agent_result,
+            client=client,
+            started=started,
+        )
+        return response
 
 
 @app.post("/api/chat/end")

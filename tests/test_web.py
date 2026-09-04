@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -42,7 +43,7 @@ def test_static_health_and_profiles() -> None:
     health = client.get("/api/health")
     assert health.status_code == 200, health.text
     health_data = health.json()
-    assert {"ok", "source", "engine_ready", "llm_ready", "llm_model", "fallback"} <= health_data.keys()
+    assert {"ok", "source", "engine_ready", "llm_ready", "llm_model", "fallback", "turn_log_dir"} <= health_data.keys()
     assert health_data["source"] == "DEMO"
     assert isinstance(health_data["engine_ready"], bool)
 
@@ -110,3 +111,88 @@ def test_invalid_profile_persona_session_and_message() -> None:
     ).status_code == 422
     assert client.post("/api/chat/message", json={"session_id": "missing", "message": "x"}).status_code == 404
     assert client.post("/api/chat/message", json={"session_id": "missing", "message": ""}).status_code == 422
+
+
+def test_chat_turn_logs_are_readable_and_filterable(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FDT_TURN_LOG_DIR", str(tmp_path))
+    start = client.post("/api/chat/start", json={"profile_id": "A_steady", "coach_persona": "온순냥"})
+    assert start.status_code == 200
+    session_id = start.json()["session_id"]
+    message = client.post(
+        "/api/chat/message",
+        json={"session_id": session_id, "message": "오늘 얼마까지 써도 돼?"},
+    )
+    assert message.status_code == 200
+
+    logs = client.get("/api/logs/turns", params={"session_id": session_id, "limit": 50})
+    assert logs.status_code == 200
+    payload = logs.json()
+    assert len(payload["turns"]) == 2
+    assert [row["turn"] for row in payload["turns"]] == [2, 1]
+    assert all(row["session_id"] == session_id for row in payload["turns"])
+    client.post("/api/chat/end", json={"session_id": session_id})
+
+
+def test_turn_logs_limit_reads_latest_files_first(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FDT_TURN_LOG_DIR", str(tmp_path))
+    older = {
+        "ts": "2026-09-03T09:00:00+09:00",
+        "session_id": "s-old",
+        "turn": 1,
+    }
+    latest = [
+        {"ts": "2026-09-04T09:00:00+09:00", "session_id": "s-new", "turn": 1},
+        {"ts": "2026-09-04T10:00:00+09:00", "session_id": "s-new", "turn": 2},
+    ]
+    (tmp_path / "2026-09-03.jsonl").write_text(json.dumps(older) + "\n", encoding="utf-8")
+    (tmp_path / "2026-09-04.jsonl").write_text("\n".join(json.dumps(row) for row in latest) + "\n", encoding="utf-8")
+
+    response = client.get("/api/logs/turns", params={"limit": 2})
+
+    assert response.status_code == 200
+    assert [row["ts"] for row in response.json()["turns"]] == [
+        "2026-09-04T10:00:00+09:00",
+        "2026-09-04T09:00:00+09:00",
+    ]
+
+
+def test_turn_logs_reverse_blocks_filter_across_files_and_decode_korean(monkeypatch, tmp_path: Path) -> None:
+    import fdt.web as web
+
+    monkeypatch.setenv("FDT_TURN_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(web, "_LOG_READ_BLOCK_SIZE", 13)
+    older = [
+        {"ts": "2026-09-03T09:00:00+09:00", "session_id": "target", "reply": "오래된 한글"},
+        {"ts": "2026-09-03T09:01:00+09:00", "session_id": "other", "reply": "이전 기록"},
+        {"ts": "2026-09-03T09:02:00+09:00", "session_id": "target", "reply": "경계 이전"},
+    ]
+    latest = [
+        {"ts": "2026-09-04T09:57:00+09:00", "session_id": "other", "reply": "무관한 기록"},
+        {"ts": "2026-09-04T09:58:00+09:00", "session_id": "target", "reply": "최신 둘째"},
+        {"ts": "2026-09-04T09:59:00+09:00", "session_id": "other", "reply": "최신 기록"},
+        {"ts": "2026-09-04T10:00:00+09:00", "session_id": "target", "reply": "최신 한글"},
+    ]
+    (tmp_path / "2026-09-03.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in older) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "2026-09-04.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in latest) + "\n", encoding="utf-8"
+    )
+
+    latest_response = client.get("/api/logs/turns", params={"limit": 3})
+    assert [row["ts"] for row in latest_response.json()["turns"]] == [
+        "2026-09-04T10:00:00+09:00",
+        "2026-09-04T09:59:00+09:00",
+        "2026-09-04T09:58:00+09:00",
+    ]
+
+    filtered_response = client.get(
+        "/api/logs/turns", params={"limit": 3, "session_id": "target"}
+    )
+    filtered = filtered_response.json()["turns"]
+    assert [row["ts"] for row in filtered] == [
+        "2026-09-04T10:00:00+09:00",
+        "2026-09-04T09:58:00+09:00",
+        "2026-09-03T09:02:00+09:00",
+    ]
+    assert [row["reply"] for row in filtered] == ["최신 한글", "최신 둘째", "경계 이전"]

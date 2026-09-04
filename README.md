@@ -14,3 +14,11 @@ $env:PYTHONIOENCODING="utf-8"; .venv\Scripts\python -m fdt.cli serve
 브라우저에서 `http://127.0.0.1:8787`을 엽니다. 프로필(금융 데이터)과 코치 페르소나는 별도로 선택하며, Ollama가 없으면 규칙 라우팅·템플릿 코칭으로 자동 전환합니다. 숫자 계산은 FDT 코어가 담당하고 LLM은 툴 선택과 설명만 담당합니다.
 
 주요 명령은 `gen`, `ingest`, `state`, `forecast`, `whatif`, `risk`, `goal`, `analyze`, `brief`, `chat`, `serve`, `eval`입니다. 구현 기준은 [`docs/03_FDT_설계.md`](docs/03_FDT_설계.md)입니다.
+
+## 턴 로그
+
+`brief`·`chat`·웹 채팅 턴은 `log/turns/YYYY-MM-DD.jsonl`에 UTF-8 JSONL로 기록됩니다. 기본 경로는 저장소 안이며, 필요하면 `FDT_TURN_LOG_DIR` 환경변수로 덮어쓸 수 있습니다. 운영 지표는 다음처럼 생성합니다.
+
+```powershell
+.venv\Scripts\python -m fdt.cli eval report --log-dir log/turns
+```
