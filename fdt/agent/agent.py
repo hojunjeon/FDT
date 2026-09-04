@@ -70,6 +70,7 @@ class FdtAgent:
                 calls = self._fallback_calls(user_text)
         else:
             calls = self._fallback_calls(user_text)
+        self._correct_relative_what_if_dates(calls, user_text)
 
         tool_calls: list[dict[str, Any]] = []
         engine_json: dict[str, Any] = {}
@@ -106,6 +107,7 @@ class FdtAgent:
             "first_faithful": bool(coached.get("first_faithful", False)),
             "attempt": coached.get("attempt", 0),
             "violations": coached.get("violations", []),
+            "verdict_conflict": coached.get("verdict_conflict"),
             "persona": self.persona,
             "engine_json": engine_json,
         }
@@ -146,6 +148,7 @@ class FdtAgent:
             "first_faithful": bool(coached.get("first_faithful", False)),
             "attempt": coached.get("attempt", 0),
             "violations": coached.get("violations", []),
+            "verdict_conflict": coached.get("verdict_conflict"),
             "persona": self.persona,
             "engine_json": engine_json,
         }
@@ -222,7 +225,7 @@ class FdtAgent:
                 return dict(result)
             return {
                 "text": str(result), "faithful": True, "fallback": True, "violations": [],
-                "first_faithful": False, "attempt": 0,
+                "verdict_conflict": None, "first_faithful": False, "attempt": 0,
             }
         except Exception:
             try:
@@ -231,7 +234,7 @@ class FdtAgent:
                 text = f"현재 상태를 계산하지 못했어요. ({exc})"
             return {
                 "text": text, "faithful": True, "fallback": True, "violations": [],
-                "first_faithful": False, "attempt": 0,
+                "verdict_conflict": None, "first_faithful": False, "attempt": 0,
             }
 
     def _remember(self, user_text: str, reply: str) -> None:
@@ -280,6 +283,18 @@ class FdtAgent:
             return [{"name": "get_state", "args": {}}]
         return [{"name": "get_state", "args": {}}]
 
+    def _correct_relative_what_if_dates(self, calls: list[dict[str, Any]], text: str) -> None:
+        """상대 날짜가 있는 가상 지출은 기준일 기준 days_from_now로 고정한다."""
+        target = _parse_target_date(text, self.ctx.state.as_of)
+        if target is None:
+            return
+        days = max(0, min(60, (target - self.ctx.state.as_of).days))
+        for call in calls:
+            if call.get("name") != "what_if":
+                continue
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            call["args"] = {**args, "days_from_now": days}
+
 
 def _parse_amount(text: str) -> int | None:
     compact = text.replace(" ", "")
@@ -307,6 +322,10 @@ def _parse_days(text: str, as_of: date | None = None) -> int:
     base = as_of or date.today()
     candidates = (
         r"\d+\s*일\s*(?:뒤|후)",
+        r"(?:다음|이번)\s*달\s*\d{1,2}\s*일(?:까지|에)?",
+        r"(?:다음|이번)\s*달\s*말(?:일까지|까지|일)?",
+        r"(?:이번|다음)\s*주말|주말",
+        r"\d+\s*개월\s*(?:뒤|후)",
         r"(?:다음|이번)\s*주\s*[월화수목금토일]요일?",
         r"(?:오늘|당일|내일|익일|모레)",
         r"이번\s*달\s*말(?:일)?",
@@ -334,8 +353,13 @@ def _parse_horizon(text: str) -> int:
 def _parse_target_date(text: str, as_of: date) -> date | None:
     patterns = (
         r"20\d{2}[-./년]\s*\d{1,2}[-./월]\s*\d{1,2}일?",
+        r"(?:다음|이번)\s*달\s*\d{1,2}\s*일(?:까지|에)?",
+        r"(?:다음|이번)\s*달\s*말(?:일까지|까지|일)?",
         r"\d{1,2}월\s*\d{1,2}일",
         r"\d{1,2}월(?:말까지|까지|말)?",
+        r"(?:이번|다음)\s*주말",
+        r"주말",
+        r"\d+\s*개월\s*(?:뒤|후)",
         r"이번\s*달\s*말(?:일)?",
         r"\d{1,2}\s*(?:~|〜|-)\s*\d{1,2}\s*일(?:까지|에)?",
         r"\d{1,2}\s*일(?:까지|에)",

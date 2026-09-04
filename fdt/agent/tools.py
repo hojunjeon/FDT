@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from fdt.schemas.domain import Behavior, LedgerTx, State, VirtualSpend
 from fdt.schemas.finapi import FinSnapshot
 from fdt.taxonomy.categories import Envelope
-from fdt.twin.analytics import detect_alerts, rebalance, safe_to_spend
+from fdt.twin.analytics import detect_alerts, health, rebalance, safe_to_spend
 from fdt.twin.goal import plan_goal
 from fdt.twin.projection import project_room
 from fdt.twin.simulate import forecast, risk, what_if
@@ -99,6 +99,22 @@ def _add_months(value: date, months: int) -> date:
     return date(year, month + 1, min(value.day, calendar.monthrange(year, month + 1)[1]))
 
 
+def _date_in_month(base: date, months: int, day: int) -> date:
+    target = _add_months(base.replace(day=1), months)
+    last_day = calendar.monthrange(target.year, target.month)[1]
+    if day < 1 or day > last_day:
+        raise ValueError(f"invalid day: {day}")
+    return target.replace(day=day)
+
+
+def _weekend_date(base: date, following: bool = False) -> date:
+    """기준일의 이번 주말 또는 다음 주말 토요일을 반환한다."""
+    if not following and base.weekday() >= 5:
+        return base
+    saturday = base + timedelta(days=(5 - base.weekday()) % 7)
+    return saturday + timedelta(days=7 if following and base.weekday() != 6 else 0)
+
+
 def normalize_date(value: date | datetime | str, as_of: date | None = None) -> date:
     """ISO 날짜와 한국어 상대 날짜를 기준일에 대해 결정론적으로 해석한다."""
     base = as_of or date.today()
@@ -106,7 +122,7 @@ def normalize_date(value: date | datetime | str, as_of: date | None = None) -> d
         return value.date()
     if isinstance(value, date):
         return value
-    text = str(value).strip().replace(" ", "")
+    text = re.sub(r"\s+", "", str(value).strip())
     if not text:
         raise ValueError("date is required")
     try:
@@ -119,6 +135,14 @@ def normalize_date(value: date | datetime | str, as_of: date | None = None) -> d
     explicit = re.fullmatch(r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})", text)
     if explicit:
         return date(int(explicit.group(1)), int(explicit.group(2)), int(explicit.group(3)))
+    relative_month_day = re.fullmatch(r"(다음달|이번달)(\d{1,2})일(?:까지|에)?", text)
+    if relative_month_day:
+        month_offset = 1 if relative_month_day.group(1) == "다음달" else 0
+        return _date_in_month(base, month_offset, int(relative_month_day.group(2)))
+    relative_month_end = re.fullmatch(r"(다음달|이번달)말(?:일까지|까지|일)?", text)
+    if relative_month_end:
+        target = _add_months(base.replace(day=1), 1 if relative_month_end.group(1) == "다음달" else 0)
+        return target.replace(day=calendar.monthrange(target.year, target.month)[1])
     month_day = re.fullmatch(r"(\d{1,2})월(\d{1,2})일?", text)
     if month_day:
         month, day = int(month_day.group(1)), int(month_day.group(2))
@@ -137,9 +161,16 @@ def normalize_date(value: date | datetime | str, as_of: date | None = None) -> d
         return base + timedelta(days=2)
     if text in {"이번달말", "이번달말일", "말일"}:
         return date(base.year, base.month, calendar.monthrange(base.year, base.month)[1])
+    if re.fullmatch(r"(?:이번)?주말(?:까지|에)?", text):
+        return _weekend_date(base)
+    if re.fullmatch(r"다음주말(?:까지|에)?", text):
+        return _weekend_date(base, following=True)
     relative = re.fullmatch(r"(\d+)일(?:뒤|후)", text)
     if relative:
         return base + timedelta(days=int(relative.group(1)))
+    relative = re.fullmatch(r"(\d+)개월(?:뒤|후)", text)
+    if relative:
+        return _add_months(base, int(relative.group(1)))
     relative = re.fullmatch(r"(\d+)주(?:뒤|후)", text)
     if relative:
         return base + timedelta(weeks=int(relative.group(1)))
@@ -305,6 +336,15 @@ def _run_tool(name: str, args: dict[str, Any], ctx: TwinContext) -> Any:
     if name == "get_state":
         result = ctx.state.model_dump(mode="json")
         result["committed"] = result.get("committed", [])[:5]
+        try:
+            score, level = health(ctx.state, risk(ctx.state, ctx.behavior, seed=ctx.seed))
+        except (AttributeError, TypeError, ValueError):
+            # 테스트용 경량 컨텍스트처럼 건강도 계산에 필요한 코어 필드가 없으면 기존 값을 유지한다.
+            if isinstance(ctx.state, State):
+                raise
+        else:
+            result["health_score"] = score
+            result["health_level"] = level
         return result
     if name == "forecast_balance":
         return forecast(ctx.state, ctx.behavior, horizon_days=args["horizon_days"], seed=ctx.seed)

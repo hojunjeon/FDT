@@ -13,6 +13,11 @@ utterances:
   - {id: what-if-02, tool: what_if, utterance: "오늘 커피 3만원 써도 괜찮아?", args: {amount: 30000, envelope: "외식", days_from_now: 0, via_card: true}}
   - {id: what-if-03, tool: what_if, utterance: "10일 뒤 여행에 30만원 쓰면 어떻게 돼?", args: {amount: 300000, envelope: "취미·여가", days_from_now: 10, via_card: true}}
   - {id: what-if-04, tool: what_if, utterance: "내일 택시 5만원을 계좌로 결제해도 될까?", args: {amount: 50000, envelope: "교통비", days_from_now: 1, via_card: false}}
+  - {id: what-if-05, tool: what_if, utterance: "다음달 15일까지 쇼핑에 30만원 써도 돼?", args: {amount: 300000, envelope: "쇼핑", days_from_now: 43, via_card: true}}
+  - {id: what-if-06, tool: what_if, utterance: "다음 달 말까지 여행에 20만원 쓰면 어때?", args: {amount: 200000, envelope: "취미·여가", days_from_now: 59, via_card: true}}
+  - {id: what-if-07, tool: what_if, utterance: "이번 주말에 외식으로 15만원 써도 될까?", args: {amount: 150000, envelope: "외식", days_from_now: 3, via_card: true}}
+  - {id: what-if-08, tool: what_if, utterance: "다음 주말에 여행 25만원 결제해도 돼?", args: {amount: 250000, envelope: "취미·여가", days_from_now: 10, via_card: true}}
+  - {id: what-if-09, tool: what_if, utterance: "1개월 뒤에 신발 12만원 사도 괜찮아?", args: {amount: 120000, envelope: "쇼핑", days_from_now: 30, via_card: true}}
 
   - {id: risk-01, tool: payment_risk, utterance: "카드값 결제 위험 알려줘", args: {}}
   - {id: risk-02, tool: payment_risk, utterance: "결제 부족 확률이 얼마나 돼?", args: {}}
@@ -23,6 +28,11 @@ utterances:
   - {id: goal-02, tool: goal_plan, utterance: "2026-11-30까지 100만원 저축 계획 세워줘", args: {target_amount: 1000000, target_date: "2026-11-30"}}
   - {id: goal-03, tool: goal_plan, utterance: "9월 말까지 50만원 모을 수 있어?", args: {target_amount: 500000, target_date: "2026-09-30"}}
   - {id: goal-04, tool: goal_plan, utterance: "200만원 목표를 위한 주간 한도 알려줘", args: {target_amount: 2000000}}
+  - {id: goal-05, tool: goal_plan, utterance: "다음달 15일까지 100만원 모으고 싶어", args: {target_amount: 1000000, target_date: "2026-10-15"}}
+  - {id: goal-06, tool: goal_plan, utterance: "다음 달 말까지 50만원 저축하려면?", args: {target_amount: 500000, target_date: "2026-10-31"}}
+  - {id: goal-07, tool: goal_plan, utterance: "이번 주말까지 20만원 모을 수 있을까?", args: {target_amount: 200000, target_date: "2026-09-05"}}
+  - {id: goal-08, tool: goal_plan, utterance: "다음 주말까지 30만원 모으는 계획 세워줘", args: {target_amount: 300000, target_date: "2026-09-12"}}
+  - {id: goal-09, tool: goal_plan, utterance: "1개월 뒤까지 40만원 모으려면?", args: {target_amount: 400000, target_date: "2026-10-02"}}
 
   - {id: safe-01, tool: safe_to_spend, utterance: "오늘 쓸 수 있는 안심 한도 얼마야?", args: {}}
   - {id: safe-02, tool: safe_to_spend, utterance: "이번 달 남은 돈이 얼마지?", args: {}}

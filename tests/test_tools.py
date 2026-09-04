@@ -50,10 +50,22 @@ def test_amount_normalization(raw, expected):
         ("모레", date(2026, 9, 4)), ("3일 뒤", date(2026, 9, 5)),
         ("2주 후", date(2026, 9, 16)), ("다음 주 금요일", date(2026, 9, 11)),
         ("이번 달 말", date(2026, 9, 30)), ("25일", date(2026, 9, 25)),
+        ("다음달 15일", date(2026, 10, 15)), ("다음  달 15일까지", date(2026, 10, 15)),
+        ("이번달 15일", date(2026, 9, 15)), ("다음달 말", date(2026, 10, 31)),
+        ("이번 주말", date(2026, 9, 5)), ("다음 주말", date(2026, 9, 12)),
+        ("주말", date(2026, 9, 5)), ("2개월 후", date(2026, 11, 2)),
     ],
 )
 def test_relative_date_normalization(raw, expected):
     assert normalize_date(raw, date(2026, 9, 2)) == expected
+
+
+def test_weekend_on_weekend_uses_today_for_bare_weekend():
+    saturday = date(2026, 9, 5)
+    sunday = date(2026, 9, 6)
+    assert normalize_date("주말", saturday) == saturday
+    assert normalize_date("주말", sunday) == sunday
+    assert normalize_date("다음 주말", sunday) == date(2026, 9, 12)
 
 
 @pytest.mark.parametrize(
@@ -95,3 +107,13 @@ def test_execute_tool_serializes_every_tool(monkeypatch, context):
 def test_execute_tool_wraps_validation_errors(context):
     assert "error" in execute_tool("forecast_balance", {"horizon_days": 6}, context)
     assert "error" in execute_tool("not_a_tool", {}, context)
+
+
+def test_get_state_recomputes_health_from_twin(monkeypatch, context):
+    monkeypatch.setattr(tools, "risk", lambda state, behavior, seed: {"seed": seed})
+    monkeypatch.setattr(tools, "health", lambda state, risk_result: (61.5, "WARNING"))
+
+    result = execute_tool("get_state", {}, context)
+
+    assert result["health_score"] == 61.5
+    assert result["health_level"] == "WARNING"
