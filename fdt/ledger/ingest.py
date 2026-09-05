@@ -64,8 +64,13 @@ def ingest(snap: FinSnapshot, source: Source = Source.SEED, fallback: FallbackCl
                 # 금융망은 취소 시 원 승인 레코드의 상태만 바뀐다. 승인(-)과 취소 환불(+)을 모두 남겨 이력 보존, 순액 0.
                 txs.append(LedgerTx(tx_id=f"C:{hist.cardNo}:{t.transactionUniqueNo}:cancel", amount=amt, summary="취소", flow=Flow.REFUND, **base))
 
-    txs.sort(key=lambda x: (x.occurred_at, x.tx_id))
-    return txs
+    unique: dict[str, LedgerTx] = {}
+    for tx in txs:
+        previous = unique.get(tx.tx_id)
+        if previous is not None and previous != tx:
+            raise ValueError(f"서로 다른 내용의 중복 거래 ID: {tx.tx_id}")
+        unique[tx.tx_id] = tx
+    return sorted(unique.values(), key=lambda tx: (tx.occurred_at, tx.tx_id))
 
 
 def save_ledger(txs: list[LedgerTx], path: Path) -> None:

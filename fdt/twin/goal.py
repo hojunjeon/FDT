@@ -9,12 +9,10 @@ import numpy as np
 
 from fdt.schemas.domain import Behavior, FixedCommitment, GoalPlan, State, WeeklyCap
 from fdt.taxonomy.categories import ENVELOPES, ESSENTIAL_ENVELOPES, Envelope
-try:
-    from fdt.twin.simulate import simulate
-except ModuleNotFoundError as error:  # T4 can be imported while T3 is still being assembled.
-    if error.name != "fdt.twin.simulate":
-        raise
-    simulate = None
+from fdt.twin.simulate import simulate, _next_income
+
+
+MAX_GOAL_HORIZON_DAYS = 365
 
 
 def plan_goal(state: State, behavior: Behavior, target_amount: int, target_date: date, seed: int = 42) -> GoalPlan:
@@ -35,11 +33,10 @@ def plan_goal(state: State, behavior: Behavior, target_amount: int, target_date:
             note="목표일은 기준일 이후여야 합니다.",
         )
 
-    if simulate is None:
-        from fdt.twin.simulate import simulate as run_simulation
-    else:
-        run_simulation = simulate
-    result = run_simulation(state, behavior, horizon_days=horizon, n_paths=1000, seed=seed)
+    if horizon > MAX_GOAL_HORIZON_DAYS:
+        raise ValueError(f"목표일은 기준일부터 {MAX_GOAL_HORIZON_DAYS}일 이내여야 합니다.")
+
+    result = simulate(state, behavior, horizon_days=horizon, n_paths=1000, seed=seed)
     spend = np.asarray(result.envelope_spend, dtype=float)
     if spend.ndim != 2 or spend.shape[1] != len(ENVELOPES):
         raise ValueError("simulation envelope_spend must have shape (n_paths, 7)")
@@ -92,7 +89,7 @@ def plan_goal(state: State, behavior: Behavior, target_amount: int, target_date:
 
 def _expected_income(state: State, behavior: Behavior, horizon: int) -> int:
     """기준일 이후 목표 기간의 예상 수입을 계산한다."""
-    amount = behavior.income_amount_median or state.expected_income
+    amount = state.expected_income or behavior.income_amount_median
     if amount <= 0:
         return 0
 
@@ -103,21 +100,17 @@ def _expected_income(state: State, behavior: Behavior, horizon: int) -> int:
         return int(amount * horizon / gap * 0.8)
 
     next_date = state.next_income_date
-    if next_date is None and dates:
-        next_date = _add_month(dates[-1])
-        while next_date <= state.as_of:
-            next_date = _add_month(next_date)
     if next_date is None:
         return 0
 
     total = 0
     current = next_date
     while current <= state.as_of:
-        current = _add_month(current)
+        current = _next_income(current, behavior)
     end = state.as_of.toordinal() + horizon
     while current.toordinal() <= end:
         total += amount
-        current = _add_month(current)
+        current = _next_income(current, behavior)
     return total
 
 
@@ -125,23 +118,27 @@ def _fixed_outflow(state: State, target_date: date) -> int:
     """큐의 기간 내 항목과 월 반복 고정비를 합산한다."""
     selected = [c for c in state.committed if state.as_of < c.due <= target_date]
     total = sum(c.amount for c in selected)
-    groups: dict[tuple[str, str, str], list[FixedCommitment]] = {}
+    groups: dict[tuple[str, str, str, str | None], list[FixedCommitment]] = {}
     for commitment in selected:
         if commitment.kind != "카드대금":
-            groups.setdefault((commitment.kind, commitment.name, commitment.account_no), []).append(commitment)
+            groups.setdefault((commitment.kind, commitment.name, commitment.account_no, commitment.card_no), []).append(commitment)
     for commitments in groups.values():
         latest = max(commitments, key=lambda item: item.due)
-        due = _add_month(latest.due)
+        # Preserve the original day across February instead of chaining clamped dates.
+        anchor_day = max(item.due.day for item in commitments)
+        offset = 1
+        due = _add_month(latest.due, offset, anchor_day)
         while due <= target_date:
             total += latest.amount
-            due = _add_month(due)
+            offset += 1
+            due = _add_month(latest.due, offset, anchor_day)
     return total
 
 
-def _add_month(value: date) -> date:
-    year = value.year + (value.month == 12)
-    month = 1 if value.month == 12 else value.month + 1
-    return value.replace(day=min(value.day, monthrange(year, month)[1]), year=year, month=month)
+def _add_month(value: date, months: int = 1, anchor_day: int | None = None) -> date:
+    year, month = divmod(value.year * 12 + value.month - 1 + months, 12)
+    month += 1
+    return date(year, month, min(anchor_day or value.day, monthrange(year, month)[1]))
 
 
 def _weekly_caps(

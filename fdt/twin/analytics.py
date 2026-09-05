@@ -93,7 +93,7 @@ def rebalance(state: State, behavior: Behavior) -> RebalancePlan:
         {
             "from_envelope": source,
             "to_envelope": trigger,
-            "amount": int(shortfall * slack / total_slack // 1000) * 1000,
+            "amount": int(min(shortfall, total_slack) * slack / total_slack // 1000) * 1000,
         }
         for source, slack in supply.items()
         if total_slack > 0 and slack > 0

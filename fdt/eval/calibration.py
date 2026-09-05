@@ -129,8 +129,15 @@ def calibration_report(pairs: list[tuple[float, int]], n_bins: int = 5) -> dict[
     brier = sum((probability - observed) ** 2 for probability, observed in checked) / total if total else None
     prevalence = sum(observed for _, observed in checked) / total if total else None
     baseline_brier = prevalence * (1.0 - prevalence) if prevalence is not None else None
-    passed = bool(total and ece <= 0.15 and brier is not None and baseline_brier is not None and brier < baseline_brier)
+    enough_data = (
+        total >= 30
+        and len({observed for _, observed in checked}) == 2
+        and all(item["count"] >= 15 for item in bins if item["count"])
+    )
+    passed = bool(enough_data and ece <= 0.15 and brier is not None and baseline_brier is not None and brier < baseline_brier)
     return {"n": total, "bins": bins, "ece": ece if total else None, "brier": brier,
             "baseline_brier": baseline_brier, "prevalence": prevalence,
-            "criteria": {"ece_max": 0.15, "brier_must_be_below_baseline": True}, "passed": passed,
-            "status": "complete" if total else "blocked"}
+            "criteria": {"ece_max": 0.15, "brier_must_be_below_baseline": True,
+                         "min_samples": 30, "min_samples_per_occupied_bin": 15,
+                         "both_outcomes_required": True}, "passed": passed,
+            "status": "blocked" if not total else "complete" if enough_data else "insufficient_data"}
