@@ -20,7 +20,7 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       FDT_OLLAMA_URL: http://127.0.0.1:1
-      FDT_TURN_LOG_DIR: ${{ runner.temp }}/fdt-turns
+      FDT_TURN_LOG_DIR: log/turns
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
