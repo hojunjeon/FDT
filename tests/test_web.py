@@ -7,6 +7,12 @@ import os
 from pathlib import Path
 
 import httpx
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def enable_debug_log_api(monkeypatch):
+    monkeypatch.setenv("FDT_ENABLE_LOG_API", "1")
 
 from fdt.web import app
 

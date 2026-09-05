@@ -31,3 +31,6 @@ packages = ["fdt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"data/seed" = "fdt/demo/seed"

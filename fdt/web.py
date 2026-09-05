@@ -2,18 +2,19 @@
 from __future__ import annotations
 
 import json
+import heapq
 import os
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
 import yaml
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,7 +35,9 @@ from fdt.twin.state import build_state
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
-SEED_DIR = PROJECT_DIR / "data" / "seed"
+_SOURCE_SEED_DIR = PROJECT_DIR / "data" / "seed"
+_DEFAULT_SEED_DIR = _SOURCE_SEED_DIR if _SOURCE_SEED_DIR.is_dir() else BASE_DIR / "demo" / "seed"
+SEED_DIR = Path(os.getenv("FDT_SEED_DIR", str(_DEFAULT_SEED_DIR)))
 STATIC_DIR = BASE_DIR / "static"
 COACH_PERSONAS = (
     {"id": "도도냥", "name": "도도냥", "description": "짧고 직설적인 코치"},
@@ -87,10 +90,31 @@ class _Session:
     room: RoomProjection
     turn: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
+    active: bool = True
+    last_used: float = field(default_factory=time.monotonic)
 
 
 _SESSIONS: dict[str, _Session] = {}
 _SESSIONS_LOCK = threading.Lock()
+_MAX_SESSIONS = 64
+_SESSION_TTL_SECONDS = 30 * 60
+_PENDING_STARTS = 0
+
+
+def _prune_sessions_locked() -> None:
+    """Caller holds the registry lock; busy session locks are never waited on."""
+    now = time.monotonic()
+    for session_id, session in list(_SESSIONS.items()):
+        if not session.lock.acquire(blocking=False):
+            continue
+        try:
+            if not session.active or now - session.last_used >= _SESSION_TTL_SECONDS:
+                session.active = False
+                _SESSIONS.pop(session_id, None)
+        finally:
+            session.lock.release()
+
+
 _TURN_LOGGER = TurnLogger()
 _LOG_READ_BLOCK_SIZE = 64 * 1024
 
@@ -383,7 +407,8 @@ def _result_visualization(tool: str, raw_data: Any) -> dict[str, Any] | None:
             for index, (day, value) in enumerate(zip(dates, median))
             if index < len(low) and index < len(high)
         ]
-        return {"type": "forecast_line", "title": "30일 잔액 예측", "unit": "KRW", "series": series}
+        title = f"{dates[0]}~{dates[-1]} 잔액 예측" if dates else "잔액 예측"
+        return {"type": "forecast_line", "title": title, "unit": "KRW", "series": series}
 
     if tool == "what_if":
         base, branch = data.get("base", {}), data.get("branch", {})
@@ -401,14 +426,14 @@ def _result_visualization(tool: str, raw_data: Any) -> dict[str, Any] | None:
 
     if tool == "payment_risk":
         return {
-            "type": "comparison_bar",
+            "type": "table",
             "title": "결제 부족 위험",
-            "unit": "",
-            "series": [
-                {"label": "위험 점수", "value": data.get("risk_score")},
-                {"label": "전체 부족 확률", "value": data.get("shortfall_prob")},
-                {"label": "카드 부족 확률", "value": data.get("card_shortfall_prob")},
+            "columns": [
+                {"key": "risk_score", "label": "위험 점수 (0~100)"},
+                {"key": "shortfall_prob", "label": "전체 부족 확률", "format": "percent"},
+                {"key": "card_shortfall_prob", "label": "카드 부족 확률", "format": "percent"},
             ],
+            "rows": [{key: data.get(key) for key in ("risk_score", "shortfall_prob", "card_shortfall_prob")}],
             "status": data.get("level"),
         }
 
@@ -462,13 +487,14 @@ def _chat_results(result: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         tool = str(call.get("name", "get_state"))
         data = _dump(call.get("result", {}))
-        results.append({"tool": tool, "data": data, "visualization": _result_visualization(tool, data)})
+        failed = isinstance(data, dict) and ("error" in data or data.get("status") == "not_available")
+        results.append({"tool": tool, "data": data, "visualization": None if failed else _result_visualization(tool, data)})
     return results
 
 
 def _http_engine_error(exc: Exception) -> HTTPException:
     """코어 실패를 503으로 표준화한다. §9.2.3"""
-    return HTTPException(status_code=503, detail=str(exc))
+    return HTTPException(status_code=503, detail="엔진 계산을 완료하지 못했습니다. 서버 상태를 확인하세요.")
 
 
 @app.get("/", include_in_schema=False)
@@ -477,13 +503,20 @@ def root() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/live")
+def api_live() -> dict[str, bool]:
+    """Cheap liveness probe; does not run a model or access Ollama."""
+    return {"ok": True}
+
+
 @app.get("/api/health")
 def api_health(response: Response) -> dict[str, Any]:
     """엔진과 LLM 준비 상태를 분리해 반환한다. §9.2.2"""
     engine_ready = False
     try:
-        if _profile_ids():
-            _build_context(_profile_ids()[0])
+        profiles = _profile_ids()
+        if profiles:
+            _load_seed(profiles[0])
             engine_ready = True
     except Exception:
         engine_ready = False
@@ -529,32 +562,43 @@ def _sorted_log_files(directory: Path) -> list[Path]:
 
 
 def _read_turn_records(paths: list[Path], limit: int, session_id: str | None) -> list[dict[str, Any]]:
-    """주어진 파일들을(최신순으로 가정) 역방향으로 읽어 limit 만큼 레코드를 모은다."""
-    records: list[dict[str, Any]] = []
-    for path in paths:
+    """Merge records by their timestamp, keeping at most limit records in memory."""
+    def records():
+        for path in paths:
+            try:
+                for line in _iter_lines_reverse(path):
+                    if not line.strip():
+                        continue
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict) and (session_id is None or value.get("session_id") == session_id):
+                        yield value
+            except OSError:
+                continue
+
+    def timestamp(record):
         try:
-            for line in _iter_lines_reverse(path):
-                if not line.strip():
-                    continue
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict) and (session_id is None or value.get("session_id") == session_id):
-                    records.append(value)
-                    if len(records) >= limit:
-                        return records
-        except OSError:
-            continue
-    return records
+            value = datetime.fromisoformat(str(record.get("ts", "")).replace("Z", "+00:00"))
+            return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        except (ValueError, OverflowError):
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    return heapq.nlargest(limit, records(), key=timestamp)
 
 
 @app.get("/api/logs/turns")
 def get_turn_logs(
+    request: Request,
     limit: int = Query(default=50, ge=1, le=500),
     session_id: str | None = Query(default=None, min_length=1, max_length=80),
 ) -> dict[str, Any]:
     """최근 턴 로그를 읽기 전용으로 반환한다. §9.2.2"""
+    if os.getenv("FDT_ENABLE_LOG_API", "0") != "1":
+        raise HTTPException(status_code=404, detail="로그 조회 API가 비활성화되어 있습니다.")
+    if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(status_code=403, detail="로그는 로컬에서만 조회할 수 있습니다.")
     directory = _TURN_LOGGER.log_dir
     if not directory.is_dir():
         return {"turns": []}
@@ -564,9 +608,11 @@ def get_turn_logs(
     if session_id:
         # 새 계층 구조는 세션의 모든 턴을 그 session_id 가 든 파일(들)에만 담으므로,
         # 파일명이 일치하는 파일만 읽으면 그것으로 충분하다(전수 검색 불필요).
-        matched_paths = [path for path in all_paths if session_id in path.name]
+        matched_paths = [path for path in all_paths if path.name.endswith(f"-{session_id}.jsonl")]
         if matched_paths:
-            return {"turns": _read_turn_records(matched_paths, limit, session_id)[:limit]}
+            # Old flat logs may also contain this session; do not drop their records.
+            selected = [path for path in all_paths if path in matched_paths or path.parent == directory]
+            return {"turns": _read_turn_records(selected, limit, session_id)[:limit]}
         # 파일명에서 못 찾으면(예: 구 평면 파일) 기존처럼 전수 검색으로 폴백한다.
 
     return {"turns": _read_turn_records(all_paths, limit, session_id)[:limit]}
@@ -638,11 +684,17 @@ def get_profile(profile_id: str, as_of: date | None = Query(default=None)) -> di
 @app.post("/api/chat/start")
 def start_chat(request: ChatStartRequest) -> dict[str, Any]:
     """금융 프로필과 코치 페르소나를 분리한 메모리 세션을 만든다. §9.2.3"""
+    global _PENDING_STARTS
     started = time.perf_counter()
     if request.profile_id not in _profile_ids():
         raise HTTPException(status_code=404, detail=f"프로필을 찾을 수 없습니다: {request.profile_id}")
     if request.coach_persona not in COACH_PERSONA_IDS:
         raise HTTPException(status_code=422, detail="coach_persona가 올바르지 않습니다.")
+    with _SESSIONS_LOCK:
+        _prune_sessions_locked()
+        if len(_SESSIONS) + _PENDING_STARTS >= _MAX_SESSIONS:
+            raise HTTPException(status_code=429, detail="세션이 너무 많습니다. 기존 대화를 종료하세요.")
+        _PENDING_STARTS += 1
     try:
         ctx, risk_result, room = _build_context(request.profile_id, request.as_of)
         session_id = uuid4().hex
@@ -683,6 +735,9 @@ def start_chat(request: ChatStartRequest) -> dict[str, Any]:
         raise _http_engine_error(exc) from exc
     except Exception as exc:
         raise _http_engine_error(exc) from exc
+    finally:
+        with _SESSIONS_LOCK:
+            _PENDING_STARTS -= 1
 
 
 @app.post("/api/chat/message")
@@ -694,6 +749,9 @@ def chat_message(request: ChatMessageRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
 
     with session.lock:
+        if not session.active or time.monotonic() - session.last_used >= _SESSION_TTL_SECONDS:
+            session.active = False
+            raise HTTPException(status_code=404, detail="종료되었거나 만료된 세션입니다.")
         started = time.perf_counter()
         client = getattr(session.agent, "client", None)
         _reset_usage(client)
@@ -702,12 +760,14 @@ def chat_message(request: ChatMessageRequest) -> dict[str, Any]:
         except Exception as exc:
             raise _http_engine_error(exc) from exc
         results = _chat_results(agent_result)
-        route = [item["tool"] for item in results] or ["get_state"]
+        route = [item["tool"] for item in results] or ["chat"]
         route.append("coach")
         session.turn += 1
+        session.last_used = time.monotonic()
         response = {
             "session_id": session.id,
             "active": True,
+            "status": agent_result.get("status", "ok"),
             "message": str(agent_result.get("reply", "")),
             "route": route,
             "results": results,
@@ -735,9 +795,12 @@ def end_chat(request: ChatEndRequest) -> dict[str, Any]:
     """메모리 세션을 종료하고 삭제한다. §9.2.3"""
     with _SESSIONS_LOCK:
         session = _SESSIONS.get(request.session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
-        with session.lock:
+    if session is None:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+    with session.lock:
+        session.active = False
+    with _SESSIONS_LOCK:
+        if _SESSIONS.get(request.session_id) is session:
             _SESSIONS.pop(request.session_id, None)
     return {
         "session_id": request.session_id,

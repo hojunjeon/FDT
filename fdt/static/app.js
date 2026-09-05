@@ -31,15 +31,25 @@ const state = {
   sessionId: null,
   active: false,
   sending: false,
+  starting: false,
+  loading: false,
+  viewVersion: 0,
+  messageController: null,
+};
+
+const numeric = value => {
+  if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'object') return NaN;
+  if (typeof value === 'string' && !value.trim()) return NaN;
+  return Number(value);
 };
 
 const money = value => {
-  const number = Number(value);
+  const number = numeric(value);
   return Number.isFinite(number) ? `${Math.round(number).toLocaleString('ko-KR')}원` : '자료 없음';
 };
 
 const percent = value => {
-  const number = Number(value);
+  const number = numeric(value);
   return Number.isFinite(number) ? `${Math.round(number * 100)}%` : '자료 없음';
 };
 
@@ -64,8 +74,8 @@ function toast(message) {
 
 function setActive(active) {
   state.active = active;
-  ui.startButton.disabled = active || !state.profileId || !state.coachPersona;
-  ui.endButton.disabled = !active;
+  ui.startButton.disabled = active || state.starting || state.loading || !state.profileId || !state.coachPersona;
+  ui.endButton.disabled = !active && !state.starting;
   ui.messageInput.disabled = !active;
   ui.sendButton.disabled = !active || state.sending;
   ui.messageInput.placeholder = active ? '평소처럼 질문하거나 금융 작업을 부탁하세요' : '대화를 시작한 뒤 메시지를 입력하세요';
@@ -102,7 +112,7 @@ function renderCoaches() {
       state.coachPersona = coach.id;
       renderCoaches();
       renderAgentHeader();
-      if (state.active && state.sessionId) await endConversation(true);
+      await endConversation(true);
       setActive(false);
     });
     ui.coachList.appendChild(button);
@@ -147,7 +157,7 @@ function renderState(payload) {
     stat('다음 수입', dateLabel(data.next_income_date)),
     stat('예상 수입', money(data.expected_income)),
     stat('약정 지출', `${Array.isArray(data.committed) ? data.committed.length : 0}건`),
-    stat('가속도', Number.isFinite(Number(data.acceleration)) ? `${Number(data.acceleration).toFixed(2)}배` : '자료 없음'),
+    stat('가속도', Number.isFinite(numeric(data.acceleration)) ? `${numeric(data.acceleration).toFixed(2)}배` : '자료 없음'),
   );
 
   ui.roomStatus.textContent = room.level ? `${room.level} · ${room.weather || ''}` : '-';
@@ -226,7 +236,35 @@ function formatValue(value, format) {
   if (value === null || value === undefined || value === '') return '자료 없음';
   if (format === 'money') return money(value);
   if (format === 'date') return dateLabel(value);
+  if (format === 'percent') return percent(value);
   return String(value);
+}
+
+function forecastChart(series) {
+  const points = series.filter(item => [item.low, item.value, item.high].every(value => Number.isFinite(numeric(value))));
+  if (!points.length) return null;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 520 180');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', '예측 잔액 중앙값과 P10에서 P90까지의 범위');
+  svg.style.width = '100%';
+  const low = Math.min(0, ...points.map(item => numeric(item.low)));
+  const high = Math.max(1, ...points.map(item => numeric(item.high)));
+  const x = index => 16 + index / Math.max(1, points.length - 1) * 488;
+  const y = value => 160 - (numeric(value) - low) / Math.max(1, high - low) * 140;
+  const band = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+  const upper = points.map((item, index) => `${x(index)},${y(item.high)}`);
+  const lower = points.map((item, index) => `${x(index)},${y(item.low)}`).reverse();
+  band.setAttribute('points', [...upper, ...lower].join(' '));
+  band.setAttribute('fill', 'currentColor');
+  band.setAttribute('opacity', '0.15');
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  line.setAttribute('points', points.map((item, index) => `${x(index)},${y(item.value)}`).join(' '));
+  line.setAttribute('fill', 'none');
+  line.setAttribute('stroke', 'currentColor');
+  line.setAttribute('stroke-width', '2');
+  svg.append(band, line);
+  return svg;
 }
 
 function renderVisualization(spec, data, tool) {
@@ -264,6 +302,8 @@ function renderVisualization(spec, data, tool) {
     return box;
   }
   if (spec.type === 'forecast_line') {
+    const chart = forecastChart(spec.series || []);
+    if (chart) box.appendChild(chart);
     const table = document.createElement('table');
     table.className = 'viz-table';
     const head = document.createElement('tr');
@@ -277,7 +317,7 @@ function renderVisualization(spec, data, tool) {
     box.appendChild(table);
     return box;
   }
-  const series = (spec.series || []).filter(item => item.value !== null && item.value !== undefined);
+  const series = (spec.series || []).filter(item => Number.isFinite(numeric(item.value)));
   const max = Math.max(1, ...series.map(item => Math.abs(Number(item.value)) || 0));
   series.forEach(item => {
     const row = document.createElement('div');
@@ -298,62 +338,103 @@ function renderVisualization(spec, data, tool) {
 }
 
 async function selectProfile(profileId, requestedAsOf = '') {
+  const ending = endConversation(true);
+  const version = state.viewVersion;
+  state.loading = true;
+  setActive(false);
   try {
-    if (state.active && state.sessionId) await endConversation(true);
+    await ending;
+    if (version !== state.viewVersion) return;
     const suffix = requestedAsOf ? `?as_of=${encodeURIComponent(requestedAsOf)}` : '';
     const payload = await api(`/api/profiles/${encodeURIComponent(profileId)}${suffix}`);
+    if (version !== state.viewVersion) return;
     state.profileId = profileId;
     renderState(payload);
     ui.chatLog.replaceChildren(Object.assign(document.createElement('div'), { className: 'empty', textContent: '대화를 시작하면 엔진 결과를 이곳에 표시합니다.' }));
     toast(`${payload.profile?.name || profileId} 금융 프로필을 불러왔습니다.`);
   } catch (error) {
-    toast(error.message);
+    if (version === state.viewVersion) toast(error.message);
+  } finally {
+    if (version === state.viewVersion) {
+      state.loading = false;
+      setActive(state.active);
+    }
   }
 }
 
 async function startConversation() {
-  if (!state.profileId || state.active) return;
+  if (!state.profileId || state.active || state.starting || state.loading) return;
+  const version = state.viewVersion;
+  state.starting = true;
+  setActive(false);
   try {
     const body = { profile_id: state.profileId, coach_persona: state.coachPersona };
     if (ui.asOf.value) body.as_of = ui.asOf.value;
     const payload = await api('/api/chat/start', { method: 'POST', body: JSON.stringify(body) });
+    if (version !== state.viewVersion) {
+      // A cancelled start may still have created a server-side session.
+      await api('/api/chat/end', { method: 'POST', body: JSON.stringify({ session_id: payload.session_id }) }).catch(() => {});
+      return;
+    }
     state.sessionId = payload.session_id;
     appendMessage('assistant', payload.message, payload.route || []);
     setActive(true);
     ui.messageInput.focus();
   } catch (error) {
-    toast(error.message);
+    if (version === state.viewVersion) toast(error.message);
+  } finally {
+    if (version === state.viewVersion) {
+      state.starting = false;
+      setActive(state.active);
+    }
   }
 }
 
 async function endConversation(silent = false) {
-  if (!state.sessionId) return;
+  const sessionId = state.sessionId;
+  const version = ++state.viewVersion;
+  state.messageController?.abort();
+  state.messageController = null;
+  state.sessionId = null;
+  state.sending = false;
+  state.starting = false;
+  state.loading = false;
+  setActive(false);
+  if (!sessionId) return;
   try {
-    const payload = await api('/api/chat/end', { method: 'POST', body: JSON.stringify({ session_id: state.sessionId }) });
-    if (!silent) appendMessage('assistant', payload.message, payload.route || []);
+    const payload = await api('/api/chat/end', { method: 'POST', body: JSON.stringify({ session_id: sessionId }) });
+    if (!silent && version === state.viewVersion) appendMessage('assistant', payload.message, payload.route || []);
   } catch (error) {
-    if (!silent) toast(error.message);
-  } finally {
-    state.sessionId = null;
-    setActive(false);
+    if (!silent && version === state.viewVersion) toast(error.message);
   }
 }
 
 async function sendMessage(message) {
   const clean = message.trim();
   if (!clean || !state.active || state.sending) return;
+  const sessionId = state.sessionId;
+  const version = state.viewVersion;
+  const controller = new AbortController();
+  const current = () => version === state.viewVersion && sessionId === state.sessionId && state.active;
+  state.messageController = controller;
   state.sending = true;
   setActive(true);
   appendMessage('user', clean);
   try {
-    const payload = await api('/api/chat/message', { method: 'POST', body: JSON.stringify({ session_id: state.sessionId, message: clean }) });
-    appendMessage('assistant', payload.message, payload.route || [], payload.results || []);
+    const payload = await api('/api/chat/message', {
+      method: 'POST', signal: controller.signal,
+      body: JSON.stringify({ session_id: sessionId, message: clean }),
+    });
+    if (current()) appendMessage('assistant', payload.message, payload.route || [], payload.results || []);
   } catch (error) {
-    appendMessage('assistant', `요청을 처리하지 못했어요. ${error.message}`);
+    if (current() && error.name !== 'AbortError') appendMessage('assistant', `요청을 처리하지 못했어요. ${error.message}`);
   } finally {
-    state.sending = false;
-    setActive(true);
-    ui.messageInput.focus();
+    if (current()) {
+      state.sending = false;
+      state.messageController = null;
+      setActive(true);
+      ui.messageInput.focus();
+    }
   }
 }
 
