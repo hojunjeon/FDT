@@ -1,0 +1,60 @@
+name: FDT CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fdt-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONIOENCODING: utf-8
+      FDT_OLLAMA_URL: http://127.0.0.1:1
+      FDT_TURN_LOG_DIR: ${{ runner.temp }}/fdt-turns
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+      - name: Build distribution
+        run: uv build
+      - name: Run Python tests without Ollama
+        run: uv run --locked --extra dev pytest -q --junitxml=test-results/pytest.xml
+      - name: Run JavaScript regression tests
+        shell: bash
+        run: |
+          if compgen -G 'tests/js/*.test.cjs' > /dev/null; then
+            node --test tests/js/*.test.cjs
+          fi
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fdt-test-results
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload distributions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fdt-distributions
+          path: dist/
+          if-no-files-found: ignore
+          retention-days: 7
