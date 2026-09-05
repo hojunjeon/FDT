@@ -6,16 +6,17 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Mapping
 from datetime import date
 from typing import Any
 
 from fdt.agent import coach as coach_module
 from fdt.agent.llm import OllamaClient
-from fdt.agent.tools import TOOL_SPECS, TwinContext, execute_tool, normalize_amount, normalize_date
+from fdt.agent.tools import ACTIVE_TOOL_SPECS, TwinContext, execute_tool, normalize_amount, normalize_date
 
 
-_SYSTEM_PROMPT = """너는 KeyFin의 qwen2.5:7b-instruct-q4_K_M 금융 툴 라우터다.
+_SYSTEM_PROMPT = """너는 KeyFin의 금융 툴 라우터다.
 숫자 계산·금융 판단·답변 작성은 하지 말고, 아래 함수 중 하나를 골라 JSON 인자와 함께 호출한다.
 가장 최근 사용자 발화가 이전 대화보다 항상 우선이다. 상대 날짜는 TwinContext의 as_of 기준으로 days_from_now를 고르고, 봉투는 enum 이름을 사용한다.
 라우팅 우선순위와 대표 표현:
@@ -27,9 +28,8 @@ _SYSTEM_PROMPT = """너는 KeyFin의 qwen2.5:7b-instruct-q4_K_M 금융 툴 라�
 - 예산 조정·재배분·봉투 이동이면 rebalance_envelopes
 - 소비 알림·우려 결제·소비 속도·가속이면 spending_alerts
 - 방·날씨·고양이·기분·캐릭터 행동이면 room_status
-- 정책·혜택·금융 추천이면 policy_tips
 - 카드값·카드대금·결제일·부족 확률·리스크·마이너스 위험이면 payment_risk
-금액이 있는 구매 질문은 반드시 what_if다. what_if의 via_card는 '계좌' 또는 '체크'가 있을 때만 false이고, 그 외에는 true다. '오늘'은 days_from_now=0이다.
+금액이 있는 구매 질문은 반드시 what_if다. what_if의 via_card는 '계좌', '체크', '현금'이 있을 때 false이고, 그 외에는 true다. '오늘'은 days_from_now=0이다.
 도구를 고를 수 없으면 get_state를 호출한다. 존재하지 않는 인자나 숫자를 만들지 않는다.
 
 예시:
@@ -46,7 +46,7 @@ _SYSTEM_PROMPT = """너는 KeyFin의 qwen2.5:7b-instruct-q4_K_M 금융 툴 라�
 사용자: 7일간 우려되는 결제가 있어? → spending_alerts({"days":7})
 사용자: 오늘 방 상태는 어때? → room_status({})
 사용자: 캐릭터가 지금 무엇을 하고 있어? → room_status({})
-사용자: 받을 수 있는 정책 혜택이 있어? → policy_tips({})"""
+"""
 
 
 class FdtAgent:
@@ -57,17 +57,25 @@ class FdtAgent:
         self.client, self.ctx, self.persona = client, ctx, persona
         self.history: list[dict[str, Any]] = []
         self._available_cache: bool | None = None
+        self._available_checked_at = 0.0
 
     def ask(self, user_text: str) -> dict[str, Any]:
         """§8.6 사용자 발화를 라우팅하고 엔진 결과 기반 코칭을 반환한다."""
         if not isinstance(user_text, str) or not user_text.strip():
             raise ValueError("사용자 발화는 비어 있지 않은 문자열이어야 합니다")
 
-        routed_by_llm = self._client_available()
+        rule_calls = self._fallback_calls(user_text)
+        if not rule_calls:
+            return self._chat(user_text)
+        required = {"what_if": ("amount",), "goal_plan": ("target_amount", "target_date")}
+        missing = any(call["args"].get(key) is None for call in rule_calls
+                      for key in required.get(call["name"], ()))
+        routed_by_llm = not missing and rule_calls[0]["name"] != "policy_tips" and self._client_available()
         if routed_by_llm:
             calls = self._llm_calls(user_text)
             if not calls:
-                calls = self._fallback_calls(user_text)
+                routed_by_llm = False
+                calls = rule_calls
         else:
             calls = self._fallback_calls(user_text)
         self._correct_relative_what_if_dates(calls, user_text)
@@ -101,6 +109,7 @@ class FdtAgent:
         self._remember(user_text, reply)
         return {
             "reply": reply,
+            "status": coached.get("status", "ok"),
             "tool_calls": tool_calls,
             "faithful": bool(coached.get("faithful", False)),
             "fallback": bool(coached.get("fallback", False) or not routed_by_llm),
@@ -142,6 +151,7 @@ class FdtAgent:
             }
         return {
             "reply": reply,
+            "status": coached.get("status", "ok"),
             "tool_calls": tool_calls,
             "faithful": bool(coached.get("faithful", False)),
             "fallback": bool(coached.get("fallback", True)),
@@ -154,8 +164,10 @@ class FdtAgent:
         }
 
     def _client_available(self) -> bool:
-        if self._available_cache is not None:
+        now = time.monotonic()
+        if self._available_cache is not None and now - self._available_checked_at < 30.0:
             return self._available_cache
+        self._available_checked_at = now
         available = getattr(self.client, "available", None)
         if available is None:
             self._available_cache = True
@@ -169,9 +181,9 @@ class FdtAgent:
         return self._available_cache
 
     def _llm_calls(self, user_text: str) -> list[dict[str, Any]]:
-        messages = [{"role": "system", "content": _SYSTEM_PROMPT}, *self.history[-12:], {"role": "user", "content": user_text}]
+        messages = [{"role": "system", "content": _SYSTEM_PROMPT + f"\n실제 기준일(as_of): {self.ctx.state.as_of.isoformat()}"}, *self.history[-12:], {"role": "user", "content": user_text}]
         try:
-            response = self.client.chat(messages, tools=TOOL_SPECS, temperature=0.0)
+            response = self.client.chat(messages, tools=ACTIVE_TOOL_SPECS, temperature=0.0)
         except Exception:
             return []
         raw_calls: Any = response
@@ -183,6 +195,8 @@ class FdtAgent:
             return []
 
         calls: list[dict[str, Any]] = []
+        if len(raw_calls) > 4:
+            return [{"name": "__too_many_tools__", "args": {}}]
         for raw in raw_calls:
             if not isinstance(raw, Mapping):
                 continue
@@ -219,6 +233,30 @@ class FdtAgent:
             engine_json[name] = [engine_json[name], result]
 
     def _coach(self, intent: str, engine_json: dict[str, Any], user_text: str) -> dict[str, Any]:
+        failures = []
+        for name, result in engine_json.items():
+            for item in result if isinstance(result, list) else [result]:
+                if isinstance(item, Mapping) and ("error" in item or item.get("status") == "not_available"):
+                    failures.append((name, item))
+        if failures:
+            name, failure = failures[0]
+            status = failure.get("status", "error")
+            if status == "not_available":
+                status = "unsupported"
+            if status == "needs_input":
+                hint = {
+                    "goal_plan": "목표 금액과 기준일 이후 365일 이내의 목표 날짜를 알려 주세요.",
+                    "what_if": "구매 금액, 소비 항목, 기준일부터 0~60일 이내의 날짜를 알려 주세요.",
+                    "forecast_balance": "예측 기간은 7~60일의 정수로 알려 주세요.",
+                    "payment_risk": "위험을 확인할 기간은 7~60일의 정수로 알려 주세요.",
+                }.get(name, "입력한 금액과 날짜를 확인해 주세요.")
+                reply = "입력을 확인해야 해서 계산하지 않았어요. " + hint
+            elif status == "unsupported":
+                reply = "아직 지원하지 않는 요청이라 계산하지 않았어요. 구매 비교, 잔액 예측, 목표 계획을 요청해 주세요."
+            else:
+                reply = "금융 계산을 완료하지 못했어요. 결과를 안내할 수 없으니 다시 시도해 주세요."
+            return {"reply": reply, "status": status, "faithful": False, "fallback": True,
+                    "violations": [], "verdict_conflict": None, "first_faithful": False, "attempt": 0}
         try:
             result = coach_module.coach(self.client, self.persona, intent, engine_json, user_text)
             if isinstance(result, Mapping):
@@ -228,14 +266,34 @@ class FdtAgent:
                 "verdict_conflict": None, "first_faithful": False, "attempt": 0,
             }
         except Exception:
+            return {"reply": "계산 결과를 설명하지 못했어요. 다시 시도해 주세요.",
+                    "status": "error", "faithful": False, "fallback": True, "violations": [],
+                    "verdict_conflict": None, "first_faithful": False, "attempt": 0}
+
+    def _chat(self, user_text: str) -> dict[str, Any]:
+        """No financial tool runs for an ordinary conversation."""
+        reply = "편하게 이야기해 주세요. 구매 비교, 잔액 예측, 목표 계획도 도와드려요."
+        if "고마" in user_text or "감사" in user_text:
+            reply = "도움이 됐다니 다행이에요, 냥."
+        elif "안녕" in user_text:
+            reply = "안녕하세요, 냥. 오늘은 어떤 이야기를 나눌까요?"
+        fallback = True
+        if self._client_available():
             try:
-                text = coach_module.template_fallback(intent, engine_json, self.persona)
-            except Exception as exc:
-                text = f"현재 상태를 계산하지 못했어요. ({exc})"
-            return {
-                "text": text, "faithful": True, "fallback": True, "violations": [],
-                "verdict_conflict": None, "first_faithful": False, "attempt": 0,
-            }
+                response = self.client.chat([
+                    {"role": "system", "content": "한국어로 짧게 일상 대화만 한다. 금융 정보, 숫자, 계산 결과, 구매 허가를 만들지 않는다. 금융 계산을 실행했다고 주장하지 않는다."},
+                    {"role": "user", "content": user_text},
+                ], temperature=0.0)
+                candidate = str(response.get("message", {}).get("content", "")).strip()
+                financial = re.search(r"잔액|금액|만원|계산|이체|결제|구매|투자|한도|위험|안전|써도|사도", candidate)
+                if candidate and not financial and not coach_module.extract_numbers(candidate):
+                    reply, fallback = candidate, False
+            except Exception:
+                pass
+        self._remember(user_text, reply)
+        return {"reply": reply, "status": "chat", "tool_calls": [], "engine_json": {},
+                "faithful": True, "fallback": fallback, "first_faithful": False,
+                "attempt": 0, "violations": [], "verdict_conflict": None, "persona": self.persona}
 
     def _remember(self, user_text: str, reply: str) -> None:
         self.history.extend(({"role": "user", "content": user_text}, {"role": "assistant", "content": reply}))
@@ -246,21 +304,23 @@ class FdtAgent:
         lowered = text.lower()
         amount = _parse_amount(text)
         what_if_words = ("써도", "쓰면", "사도", "구매", "결제", "지출", "살까", "사용해도")
-        if amount is not None and any(word in text for word in what_if_words):
+        amount_text = re.search(r"\d[\d,.]*\s*(?:원|억|만|천|백)", text)
+        purchase = any(word in text for word in ("사도", "구매", "살까"))
+        if (amount is not None or amount_text or purchase) and any(word in text for word in what_if_words):
             target = _parse_target_date(text, self.ctx.state.as_of)
-            days = max(0, min(60, (target - self.ctx.state.as_of).days)) if target else _parse_days(text, self.ctx.state.as_of)
+            days = (target - self.ctx.state.as_of).days if target else _parse_days(text, self.ctx.state.as_of)
             return [{
                 "name": "what_if",
                 "args": {
                     "amount": amount,
                     "envelope": _parse_envelope(text),
                     "days_from_now": days,
-                    "via_card": "체크" not in text and "계좌" not in text,
+                    "via_card": not any(word in text for word in ("체크", "계좌", "현금")),
                     "label": text[:80],
                 },
             }]
-        if any(word in text for word in ("모으", "모을", "저축", "저금", "목표", "달성")):
-            args: dict[str, Any] = {"target_amount": amount or 0}
+        if any(word in text for word in ("모으", "모을", "모아", "저축", "저금", "목표", "달성")):
+            args: dict[str, Any] = {} if amount is None else {"target_amount": amount}
             target_date = _parse_target_date(text, self.ctx.state.as_of)
             if target_date:
                 args["target_date"] = target_date.isoformat()
@@ -273,33 +333,34 @@ class FdtAgent:
             return [{"name": "forecast_balance", "args": {"horizon_days": _parse_horizon(text)}}]
         if any(word in text for word in ("알림", "우려", "가속", "걱정", "소비가 빨라", "소비 속도")):
             return [{"name": "spending_alerts", "args": {"days": min(7, max(1, _parse_horizon(text)))}}]
-        if any(word in text for word in ("방", "고양이", "날씨", "캐릭터", "기분", "하고 있어")):
+        if any(word in text for word in ("방 상태", "방 날씨", "고양이", "캐릭터")):
             return [{"name": "room_status", "args": {}}]
         if any(word in text for word in ("정책", "혜택", "추천")):
             return [{"name": "policy_tips", "args": {}}]
-        if any(word in text for word in ("오늘", "안심", "남은 돈", "얼마까지", "편하게 써도")):
+        if any(word in text for word in ("안심", "남은 돈", "얼마까지", "편하게 써도", "얼마 써", "얼마 쓸")):
             return [{"name": "safe_to_spend", "args": {}}]
-        if "잔액" in lowered:
+        if any(word in lowered for word in ("잔액", "현황", "상태", "금융", "재정")):
             return [{"name": "get_state", "args": {}}]
-        return [{"name": "get_state", "args": {}}]
+        return []
 
     def _correct_relative_what_if_dates(self, calls: list[dict[str, Any]], text: str) -> None:
         """상대 날짜가 있는 가상 지출은 기준일 기준 days_from_now로 고정한다."""
         target = _parse_target_date(text, self.ctx.state.as_of)
-        if target is None:
-            return
-        days = max(0, min(60, (target - self.ctx.state.as_of).days))
         for call in calls:
             if call.get("name") != "what_if":
                 continue
-            args = call.get("args") if isinstance(call.get("args"), dict) else {}
-            call["args"] = {**args, "days_from_now": days}
+            args = dict(call.get("args")) if isinstance(call.get("args"), dict) else {}
+            if target is not None:
+                args["days_from_now"] = (target - self.ctx.state.as_of).days
+            if any(word in text for word in ("체크", "계좌", "현금")):
+                args["via_card"] = False
+            call["args"] = args
 
 
 def _parse_amount(text: str) -> int | None:
     compact = text.replace(" ", "")
     matches = list(re.finditer(
-        r"(?<!\d)[\d,.]+\s*(?:억|만|천|백|원)"
+        r"(?<!\d)[+-]?[\d,.]+\s*(?:억|만|천|백|원)"
         r"(?:(?:[\d,.]+\s*)?(?:억|만|천|백|원))*",
         compact,
     ))
@@ -314,7 +375,10 @@ def _parse_amount(text: str) -> int | None:
         compact,
     )
     if match:
-        return int(match.group(1).replace(",", ""))
+        try:
+            return normalize_amount(match.group(1))
+        except ValueError:
+            return None
     return None
 
 
@@ -341,17 +405,20 @@ def _parse_days(text: str, as_of: date | None = None) -> int:
             target = normalize_date(match.group(), base)
         except ValueError:
             continue
-        return max(0, min(60, (target - base).days))
+        return (target - base).days
     return 0
 
 
 def _parse_horizon(text: str) -> int:
     match = re.search(r"(\d+)\s*일", text)
-    return min(60, max(1, int(match.group(1)))) if match else 30
+    return int(match.group(1)) if match else 30
 
 
 def _parse_target_date(text: str, as_of: date) -> date | None:
     patterns = (
+        r"\d+\s*일\s*(?:뒤|후)",
+        r"\d+\s*주\s*(?:뒤|후)",
+        r"(?:다음|이번)\s*주\s*[월화수목금토일](?:요일)?",
         r"20\d{2}[-./년]\s*\d{1,2}[-./월]\s*\d{1,2}일?",
         r"(?:다음|이번)\s*달\s*\d{1,2}\s*일(?:까지|에)?",
         r"(?:다음|이번)\s*달\s*말(?:일까지|까지|일)?",

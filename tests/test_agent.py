@@ -41,7 +41,7 @@ def test_ask_executes_llm_tool_and_remembers_text(monkeypatch, context):
     assert len(client.messages) == 1
 
 
-def test_ask_without_tool_call_defaults_to_get_state(monkeypatch, context):
+def test_ordinary_chat_does_not_execute_financial_tools(monkeypatch, context):
     client = _Client({"message": {"content": "상태를 확인했어요."}})
     calls = []
     monkeypatch.setattr(agent_module, "execute_tool", lambda name, args, ctx: calls.append(name) or {"liquidity": 1})
@@ -51,8 +51,8 @@ def test_ask_without_tool_call_defaults_to_get_state(monkeypatch, context):
 
     result = agent_module.FdtAgent(client, context).ask("아무거나")
 
-    assert calls == ["get_state"]
-    assert result["fallback"] is True
+    assert calls == []
+    assert result["status"] == "chat"
 
 
 def test_unavailable_llm_uses_rule_route(monkeypatch, context):

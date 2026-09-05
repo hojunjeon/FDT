@@ -17,7 +17,7 @@ from fdt.schemas.domain import Behavior, LedgerTx, State, VirtualSpend
 from fdt.schemas.finapi import FinSnapshot
 from fdt.taxonomy.categories import Envelope
 from fdt.twin.analytics import detect_alerts, health, rebalance, safe_to_spend
-from fdt.twin.goal import plan_goal
+from fdt.twin.goal import MAX_GOAL_HORIZON_DAYS, plan_goal
 from fdt.twin.projection import project_room
 from fdt.twin.simulate import forecast, risk, what_if
 
@@ -31,6 +31,7 @@ _ENVELOPE_ALIASES: dict[Envelope, tuple[str, ...]] = {
     Envelope.GROCERY: ("편의점·마트·잡화", "편의점", "마트", "잡화", "생활용품", "장보기", "다이소"),
     Envelope.ETC: ("기타", "교육", "해외", "경조사"),
 }
+MAX_AMOUNT = 1_000_000_000_000
 _AMOUNT_UNIT = {"억": 100_000_000, "만": 10_000, "천": 1_000, "백": 100}
 _WEEKDAY = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
 
@@ -39,6 +40,8 @@ def normalize_envelope(value: Envelope | str) -> Envelope:
     """자연어 봉투 이름을 일곱 개의 고정 봉투 중 하나로 정규화한다."""
     if isinstance(value, Envelope):
         return value
+    if value is None:
+        raise ValueError("envelope is required")
     text = str(value).strip().lower()
     for envelope, aliases in _ENVELOPE_ALIASES.items():
         if text == envelope.value.lower() or text == envelope.name.lower():
@@ -55,7 +58,7 @@ def normalize_amount(value: int | float | str) -> int:
     if isinstance(value, bool):
         raise ValueError("amount must be a number")
     if isinstance(value, (int, float)):
-        if not math.isfinite(float(value)) or value < 0 or float(value) != int(value):
+        if value < 0 or value > MAX_AMOUNT or not math.isfinite(float(value)) or float(value) != int(value):
             raise ValueError("amount must be a non-negative integer")
         return int(value)
     text = str(value).strip().replace(",", "").replace("원", "").strip()
@@ -69,7 +72,7 @@ def normalize_amount(value: int | float | str) -> int:
 
 
 def _checked_amount(value: float) -> int:
-    if not math.isfinite(value) or value < 0 or value != int(value):
+    if not math.isfinite(value) or value < 0 or value > MAX_AMOUNT or value != int(value):
         raise ValueError("amount must resolve to a non-negative integer")
     return int(value)
 
@@ -219,9 +222,11 @@ def _as_bool(value: Any, default: bool = False) -> bool:
 def _bounded_int(value: Any, name: str, lower: int, upper: int, default: int) -> int:
     if value is None:
         return default
+    if isinstance(value, bool) or (isinstance(value, float) and (not math.isfinite(value) or not value.is_integer())):
+        raise ValueError(f"{name} must be an integer")
     try:
         parsed = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{name} must be an integer") from exc
     if parsed < lower or parsed > upper:
         raise ValueError(f"{name} must be between {lower} and {upper}")
@@ -239,12 +244,9 @@ def normalize_args(name: str, args: dict[str, Any] | None, ctx: TwinContext) -> 
         return {"days": _bounded_int(args.get("days"), "days", 1, 7, 1)}
     if name == "what_if":
         raw_days = args.get("days_from_now", 0)
-        try:
-            days = int(raw_days)
-        except (TypeError, ValueError):
-            days = (normalize_date(raw_days, ctx.state.as_of) - ctx.state.as_of).days
-        if days < 0 or days > 60:
-            raise ValueError("days_from_now must be between 0 and 60")
+        if isinstance(raw_days, str) and not re.fullmatch(r"[+-]?\d+", raw_days.strip()):
+            raw_days = (normalize_date(raw_days, ctx.state.as_of) - ctx.state.as_of).days
+        days = _bounded_int(raw_days, "days_from_now", 0, 60, 0)
         return {
             "amount": normalize_amount(args.get("amount")),
             "envelope": normalize_envelope(args.get("envelope")),
@@ -253,10 +255,10 @@ def normalize_args(name: str, args: dict[str, Any] | None, ctx: TwinContext) -> 
             "label": str(args.get("label", "")),
         }
     if name == "goal_plan":
-        return {
-            "target_amount": normalize_amount(args.get("target_amount")),
-            "target_date": normalize_date(args.get("target_date"), ctx.state.as_of),
-        }
+        target = normalize_date(args.get("target_date"), ctx.state.as_of)
+        if not 1 <= (target - ctx.state.as_of).days <= MAX_GOAL_HORIZON_DAYS:
+            raise ValueError(f"target_date must be 1..{MAX_GOAL_HORIZON_DAYS} days after as_of")
+        return {"target_amount": normalize_amount(args.get("target_amount")), "target_date": target}
     raise ValueError(f"unknown tool: {name}")
 
 
@@ -293,7 +295,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "horizon_days": {"type": "integer", "minimum": 7, "maximum": 60, "default": 30},
     }),
     _tool_spec("what_if", "'써도 돼', '사도 돼', 구매·결제·지출처럼 금액이 있는 가상 지출을 넣고 잔액 변화를 비교한다. 실제 결제는 하지 않는다.", {
-        "amount": {"type": "integer", "minimum": 0},
+        "amount": {"type": "integer", "minimum": 0, "maximum": MAX_AMOUNT},
         "envelope": _ENVELOPE_SCHEMA,
         "days_from_now": {"type": "integer", "minimum": 0, "maximum": 60},
         "via_card": {"type": "boolean", "default": True},
@@ -303,7 +305,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "horizon_days": {"type": "integer", "minimum": 7, "maximum": 60, "default": 30},
     }),
     _tool_spec("goal_plan", "모으기·모을 돈·저축·목표 달성의 가능성과 주간 한도를 계산한다.", {
-        "target_amount": {"type": "integer", "minimum": 0},
+        "target_amount": {"type": "integer", "minimum": 0, "maximum": MAX_AMOUNT},
         "target_date": {"type": "string", "format": "date"},
     }, ["target_amount", "target_date"]),
     _tool_spec("safe_to_spend", "오늘·이번 달 남은 돈처럼 가상 지출 금액이 없는 안심 소비 한도를 계산한다."),
@@ -316,6 +318,8 @@ TOOL_SPECS: list[dict[str, Any]] = [
 ]
 
 _TOOL_NAMES = {spec["function"]["name"] for spec in TOOL_SPECS}
+# Keep the legacy interface, but do not advertise an unimplemented tool to the LLM.
+ACTIVE_TOOL_SPECS = [spec for spec in TOOL_SPECS if spec["function"]["name"] != "policy_tips"]
 
 
 def _jsonable(value: Any) -> Any:
@@ -379,11 +383,13 @@ def _run_tool(name: str, args: dict[str, Any], ctx: TwinContext) -> Any:
 
 
 def execute_tool(name: str, args: dict[str, Any], ctx: TwinContext) -> dict[str, Any]:
-    """툴 이름 -> 트윈 함수 호출 -> 결과를 JSON 직렬화 가능한 dict 로. 알 수 없는 툴은 ValueError."""
+    """툴 이름 -> 트윈 함수 호출 -> 결과를 JSON 직렬화 가능한 dict 로. 실패 시 error와 status를 반환한다."""
     try:
         if name not in _TOOL_NAMES:
-            raise ValueError(f"unknown tool: {name}")
+            return {"error": "지원하지 않는 금융 도구입니다.", "status": "unsupported"}
         normalized = normalize_args(name, args, ctx)
         return _jsonable(_run_tool(name, normalized, ctx))
-    except Exception as exc:
-        return {"error": str(exc)}
+    except ValueError as exc:
+        return {"error": str(exc), "status": "needs_input"}
+    except Exception:
+        return {"error": "금융 계산 중 오류가 발생했습니다.", "status": "error"}
